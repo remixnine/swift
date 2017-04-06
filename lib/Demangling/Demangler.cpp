@@ -21,7 +21,7 @@
 #include "swift/Strings.h"
 
 using namespace swift;
-using namespace NewMangling;
+using namespace Mangle;
 using swift::Demangle::FunctionSigSpecializationParamKind;
 
 //////////////////////////////////
@@ -259,22 +259,14 @@ NodePointer Demangler::demangleSymbol(StringRef MangledName) {
       case Node::Kind::Type:
         Parent->addChild(Nd->getFirstChild(), *this);
         break;
-      case Node::Kind::Identifier:
-        if (StringRef(Nd->getText()).startswith("_T")) {
-          NodePointer Global = demangleOldSymbolAsNode(Nd->getText(), *this);
-          if (Global && Global->getKind() == Node::Kind::Global) {
-            for (NodePointer Child : *Global) {
-              Parent->addChild(Child, *this);
-            }
-            break;
-          }
-        }
-        LLVM_FALLTHROUGH;
       default:
         Parent->addChild(Nd, *this);
         break;
     }
   }
+  if (topLevel->getNumChildren() == 0)
+    return nullptr;
+
   if (EndPos < Text.size()) {
     topLevel->addChild(createNode(Node::Kind::Suffix, Text.substr(EndPos)), *this);
   }
@@ -623,6 +615,8 @@ NodePointer Demangler::demangleIdentifier() {
 
 NodePointer Demangler::demangleOperatorIdentifier() {
   NodePointer Ident = popNode(Node::Kind::Identifier);
+  if (!Ident)
+    return nullptr;
 
   static const char op_char_table[] = "& @/= >    <*!|+?%-~   ^ .";
 
@@ -811,7 +805,7 @@ NodePointer Demangler::popFunctionType(Node::Kind kind) {
 NodePointer Demangler::popFunctionParams(Node::Kind kind) {
   NodePointer ParamsType = nullptr;
   if (popNode(Node::Kind::EmptyList)) {
-    ParamsType = createType(createNode(Node::Kind::NonVariadicTuple));
+    ParamsType = createType(createNode(Node::Kind::Tuple));
   } else {
     ParamsType = popNode(Node::Kind::Type);
   }
@@ -819,15 +813,14 @@ NodePointer Demangler::popFunctionParams(Node::Kind kind) {
 }
 
 NodePointer Demangler::popTuple() {
-  NodePointer Root = createNode(popNode(Node::Kind::VariadicMarker) ?
-                                         Node::Kind::VariadicTuple :
-                                         Node::Kind::NonVariadicTuple);
+  NodePointer Root = createNode(Node::Kind::Tuple);
 
   if (!popNode(Node::Kind::EmptyList)) {
     bool firstElem = false;
     do {
       firstElem = (popNode(Node::Kind::FirstElementMarker) != nullptr);
       NodePointer TupleElmt = createNode(Node::Kind::TupleElement);
+      addChild(TupleElmt, popNode(Node::Kind::VariadicMarker));
       if (NodePointer Ident = popNode(Node::Kind::Identifier)) {
         TupleElmt->addChild(createNodeWithAllocatedText(
                               Node::Kind::TupleElementName, Ident->getText()),
@@ -899,17 +892,22 @@ NodePointer Demangler::demangleBoundGenericArgs(NodePointer Nominal,
 
   if (TypeListIdx >= TypeLists.size())
     return nullptr;
-  NodePointer args = TypeLists[TypeListIdx];
+  NodePointer args = TypeLists[TypeListIdx++];
 
   // Generic arguments for the outermost type come first.
   NodePointer Context = Nominal->getFirstChild();
 
-  if (Context->getKind() != Node::Kind::Module &&
-      Context->getKind() != Node::Kind::Function &&
-      Context->getKind() != Node::Kind::Extension) {
-    NodePointer BoundParent = demangleBoundGenericArgs(Context, TypeLists,
-                                                       TypeListIdx + 1);
-
+  if (TypeListIdx < TypeLists.size()) {
+    NodePointer BoundParent = nullptr;
+    if (Context->getKind() == Node::Kind::Extension) {
+      BoundParent = demangleBoundGenericArgs(Context->getChild(1), TypeLists,
+                                             TypeListIdx);
+      BoundParent = createWithChildren(Node::Kind::Extension,
+                                       Context->getFirstChild(),
+                                       BoundParent);
+    } else {
+      BoundParent = demangleBoundGenericArgs(Context, TypeLists, TypeListIdx);
+    }
     // Rebuild this type with the new parent type, which may have
     // had its generic arguments applied.
     Nominal = createWithChildren(Nominal->getKind(), BoundParent,
@@ -1218,9 +1216,13 @@ NodePointer Demangler::demangleThunkOrSpecialization() {
     case 'O': return createNode(Node::Kind::NonObjCAttribute);
     case 'D': return createNode(Node::Kind::DynamicAttribute);
     case 'd': return createNode(Node::Kind::DirectMethodReferenceAttribute);
-    case 'V': return createNode(Node::Kind::VTableAttribute);
     case 'a': return createNode(Node::Kind::PartialApplyObjCForwarder);
     case 'A': return createNode(Node::Kind::PartialApplyForwarder);
+    case 'V': {
+      NodePointer Base = popNode(isEntity);
+      NodePointer Derived = popNode(isEntity);
+      return createWithChildren(Node::Kind::VTableThunk, Derived, Base);
+    }
     case 'W': {
       NodePointer Entity = popNode(isEntity);
       NodePointer Conf = popProtocolConformance();
@@ -1838,6 +1840,10 @@ NodePointer Demangler::demangleGenericRequirement() {
       name = "R";
     } else if (c == 'N') {
       name = "N";
+    } else if (c == 'C') {
+      name = "C";
+    } else if (c == 'D') {
+      name = "D";
     } else if (c == 'T') {
       name = "T";
     } else if (c == 'E') {
@@ -1947,6 +1953,6 @@ NodePointer Demangler::demangleObjCTypeName() {
   return Global;
 }
 
-} // end namespace NewMangling
+} // end namespace Mangle
 } // end namespace swift
 

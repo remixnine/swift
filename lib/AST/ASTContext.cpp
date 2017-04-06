@@ -18,7 +18,6 @@
 #include "ForeignRepresentationInfo.h"
 #include "swift/Strings.h"
 #include "swift/AST/GenericSignatureBuilder.h"
-#include "swift/AST/AST.h"
 #include "swift/AST/ConcreteDeclRef.h"
 #include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/DiagnosticsSema.h"
@@ -28,6 +27,7 @@
 #include "swift/AST/LazyResolver.h"
 #include "swift/AST/ModuleLoader.h"
 #include "swift/AST/NameLookup.h"
+#include "swift/AST/ParameterList.h"
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/RawComment.h"
 #include "swift/AST/SILLayout.h"
@@ -162,6 +162,9 @@ struct ASTContext::Implementation {
   /// func ==(Int, Int) -> Bool
   FuncDecl *EqualIntDecl = nullptr;
 
+  /// func append(Element) -> void
+  FuncDecl *ArrayAppendElementDecl = nullptr;
+
   /// func _unimplementedInitializer(className: StaticString).
   FuncDecl *UnimplementedInitializerDecl = nullptr;
 
@@ -205,6 +208,12 @@ struct ASTContext::Implementation {
   llvm::DenseMap<NormalProtocolConformance *,
                  std::vector<ASTContext::DelayedConformanceDiag>>
     DelayedConformanceDiags;
+
+  /// Map from normal protocol conformances to missing witnesses that have
+  /// been delayed until the conformance is fully checked, so that we can
+  /// issue a fixit that fills the entire protocol stub.
+  llvm::DenseMap<NormalProtocolConformance *, std::vector<ValueDecl*>>
+    DelayedMissingWitnesses;
 
   /// Stores information about lazy deserialization of various declarations.
   llvm::DenseMap<const DeclContext *, LazyContextData *> LazyContexts;
@@ -880,6 +889,56 @@ FuncDecl *ASTContext::getEqualIntDecl() const {
   return nullptr;
 }
 
+FuncDecl *ASTContext::getArrayAppendElementDecl() const {
+  if (Impl.ArrayAppendElementDecl)
+    return Impl.ArrayAppendElementDecl;
+
+  auto AppendFunctions = getArrayDecl()->lookupDirect(getIdentifier("append"));
+
+  for (auto CandidateFn : AppendFunctions) {
+    auto FnDecl = dyn_cast<FuncDecl>(CandidateFn);
+    auto Attrs = FnDecl->getAttrs();
+    for (auto *A : Attrs.getAttributes<SemanticsAttr, false>()) {
+      if (A->Value != "array.append_element")
+        continue;
+
+      auto ParamLists = FnDecl->getParameterLists();
+      if (ParamLists.size() != 2)
+        return nullptr;
+      if (ParamLists[0]->size() != 1)
+        return nullptr;
+
+      InOutType *SelfInOutTy =
+        ParamLists[0]->get(0)->getInterfaceType()->getAs<InOutType>();
+      if (!SelfInOutTy)
+        return nullptr;
+
+      BoundGenericStructType *SelfGenericStructTy =
+        SelfInOutTy->getObjectType()->getAs<BoundGenericStructType>();
+      if (!SelfGenericStructTy)
+        return nullptr;
+      if (SelfGenericStructTy->getDecl() != getArrayDecl())
+        return nullptr;
+
+      if (ParamLists[1]->size() != 1)
+        return nullptr;
+      GenericTypeParamType *ElementType = ParamLists[1]->get(0)->
+                             getInterfaceType()->getAs<GenericTypeParamType>();
+      if (!ElementType)
+        return nullptr;
+      if (ElementType->getName() != getIdentifier("Element"))
+        return nullptr;
+
+      if (!FnDecl->getResultInterfaceType()->isVoid())
+        return nullptr;
+
+      Impl.ArrayAppendElementDecl = FnDecl;
+      return FnDecl;
+    }
+  }
+  return nullptr;
+}
+
 FuncDecl *
 ASTContext::getUnimplementedInitializerDecl(LazyResolver *resolver) const {
   if (Impl.UnimplementedInitializerDecl)
@@ -1211,6 +1270,19 @@ GenericSignatureBuilder *ASTContext::getOrCreateGenericSignatureBuilder(
   builder->finalize(SourceLoc(), sig->getGenericParams(),
                     /*allowConcreteGenericParams=*/true);
 
+#ifndef NDEBUG
+  if (builder->getGenericSignature()->getCanonicalSignature() != sig) {
+    llvm::errs() << "ERROR: generic signature builder is not idempotent.\n";
+    llvm::errs() << "Original generic signature   : ";
+    sig->print(llvm::errs());
+    llvm::errs() << "\nReprocessed generic signature: ";
+    builder->getGenericSignature()->getCanonicalSignature()
+    ->print(llvm::errs());
+    llvm::errs() << "\n";
+    llvm_unreachable("idempotency problem with a generic signature");
+  }
+#endif
+
   // Store this generic signature builder (no generic environment yet).
   Impl.GenericSignatureBuilders[{sig, mod}] =
     std::unique_ptr<GenericSignatureBuilder>(builder);
@@ -1489,6 +1561,24 @@ void ASTContext::addDelayedConformanceDiag(
        NormalProtocolConformance *conformance,
        DelayedConformanceDiag fn) {
   Impl.DelayedConformanceDiags[conformance].push_back(std::move(fn));
+}
+
+void ASTContext::
+addDelayedMissingWitnesses(NormalProtocolConformance *conformance,
+                           ArrayRef<ValueDecl*> witnesses) {
+  auto &bucket = Impl.DelayedMissingWitnesses[conformance];
+  bucket.insert(bucket.end(), witnesses.begin(), witnesses.end());
+}
+
+std::vector<ValueDecl*> ASTContext::
+takeDelayedMissingWitnesses(NormalProtocolConformance *conformance) {
+  std::vector<ValueDecl*> result;
+  auto known = Impl.DelayedMissingWitnesses.find(conformance);
+  if (known != Impl.DelayedMissingWitnesses.end()) {
+    result = std::move(known->second);
+    Impl.DelayedMissingWitnesses.erase(known);
+  }
+  return result;
 }
 
 std::vector<ASTContext::DelayedConformanceDiag>
@@ -3366,7 +3456,7 @@ CanArchetypeType ArchetypeType::getOpened(Type existential,
 
   llvm::SmallVector<ProtocolDecl *, 4> conformsTo;
   assert(existential->isExistentialType());
-  existential->getAnyExistentialTypeProtocols(conformsTo);
+  existential->getExistentialTypeProtocols(conformsTo);
   Type superclass = existential->getSuperclass(nullptr);
 
   auto arena = AllocationArena::Permanent;
@@ -3503,18 +3593,18 @@ GenericEnvironment *GenericEnvironment::getIncomplete(
 }
 
 void DeclName::CompoundDeclName::Profile(llvm::FoldingSetNodeID &id,
-                                         Identifier baseName,
+                                         DeclBaseName baseName,
                                          ArrayRef<Identifier> argumentNames) {
-  id.AddPointer(baseName.get());
+  id.AddPointer(baseName.getAsOpaquePointer());
   id.AddInteger(argumentNames.size());
   for (auto arg : argumentNames)
     id.AddPointer(arg.get());
 }
 
-void DeclName::initialize(ASTContext &C, Identifier baseName,
+void DeclName::initialize(ASTContext &C, DeclBaseName baseName,
                           ArrayRef<Identifier> argumentNames) {
   if (argumentNames.size() == 0) {
-    SimpleOrCompound = IdentifierAndCompound(baseName, true);
+    SimpleOrCompound = BaseNameAndCompound(baseName, true);
     return;
   }
 
@@ -3540,7 +3630,7 @@ void DeclName::initialize(ASTContext &C, Identifier baseName,
 
 /// Build a compound value name given a base name and a set of argument names
 /// extracted from a parameter list.
-DeclName::DeclName(ASTContext &C, Identifier baseName,
+DeclName::DeclName(ASTContext &C, DeclBaseName baseName,
                    ParameterList *paramList) {
   SmallVector<Identifier, 4> names;
   
@@ -4050,6 +4140,12 @@ LayoutConstraint LayoutConstraint::getLayoutConstraint(LayoutConstraintKind Kind
                                                       unsigned SizeInBits,
                                                       unsigned Alignment,
                                                       ASTContext &C) {
+  if (!LayoutConstraintInfo::isKnownSizeTrivial(Kind)) {
+    assert(SizeInBits == 0);
+    assert(Alignment == 0);
+    return getLayoutConstraint(Kind);
+  }
+
   // Check to see if we've already seen this tuple before.
   llvm::FoldingSetNodeID ID;
   LayoutConstraintInfo::Profile(ID, Kind, SizeInBits, Alignment);
@@ -4070,7 +4166,4 @@ LayoutConstraint LayoutConstraint::getLayoutConstraint(LayoutConstraintKind Kind
   return LayoutConstraint(New);
 }
 
-LayoutConstraint LayoutConstraint::getUnknownLayout(ASTContext &C) {
-  return getLayoutConstraint(LayoutConstraintKind::UnknownLayout, 0, 0, C);
-}
 

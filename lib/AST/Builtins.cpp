@@ -14,10 +14,12 @@
 //
 //===----------------------------------------------------------------------===//
 
-#include "swift/AST/AST.h"
 #include "swift/AST/GenericSignatureBuilder.h"
 #include "swift/Basic/LLVMContext.h"
+#include "swift/AST/ASTContext.h"
 #include "swift/AST/Builtins.h"
+#include "swift/AST/Module.h"
+#include "swift/AST/ParameterList.h"
 #include "swift/AST/GenericEnvironment.h"
 #include "llvm/ADT/SmallString.h"
 #include "llvm/ADT/StringSwitch.h"
@@ -812,6 +814,7 @@ static ValueDecl *getNativeObjectCast(ASTContext &Context, Identifier Id,
 
   BuiltinGenericSignatureBuilder builder(Context);
   if (BV == BuiltinValueKind::CastToNativeObject ||
+      BV == BuiltinValueKind::UnsafeCastToNativeObject ||
       BV == BuiltinValueKind::CastToUnknownObject ||
       BV == BuiltinValueKind::BridgeToRawPointer) {
     builder.addParameter(makeGenericParam());
@@ -1659,6 +1662,7 @@ ValueDecl *swift::getBuiltinValueDecl(ASTContext &Context, Identifier Id) {
     return getDeallocOperation(Context, Id);
 
   case BuiltinValueKind::CastToNativeObject:
+  case BuiltinValueKind::UnsafeCastToNativeObject:
   case BuiltinValueKind::CastFromNativeObject:
   case BuiltinValueKind::CastToUnknownObject:
   case BuiltinValueKind::CastFromUnknownObject:
@@ -1758,6 +1762,9 @@ ValueDecl *swift::getBuiltinValueDecl(ASTContext &Context, Identifier Id) {
 
   case BuiltinValueKind::TSanInoutAccess:
     return getTSanInoutAccess(Context, Id);
+
+  case BuiltinValueKind::Swift3ImplicitObjCEntrypoint:
+    return getBuiltinFunction(Id, {}, TupleType::getEmpty(Context));
   }
 
   llvm_unreachable("bad builtin value!");

@@ -177,6 +177,10 @@ public:
                          llvm::Value *&box,
                          llvm::Value *&valueAddress);
 
+  void emitMakeBoxUniqueCall(llvm::Value *box, llvm::Value *typeMetadata,
+                             llvm::Value *alignMask, llvm::Value *&outBox,
+                             llvm::Value *&outValueAddress);
+
   void emitDeallocBoxCall(llvm::Value *box, llvm::Value *typeMetadata);
 
   void emitTSanInoutAccessCall(llvm::Value *address);
@@ -394,23 +398,6 @@ public:
                      llvm::Value *metadata,
                      ArrayRef<llvm::Value*> wtables);
 
-  struct ArchetypeAccessPath {
-    CanArchetypeType BaseType;
-    AssociatedTypeDecl *Association;
-  };
-
-  /// Register an additional access path to the given archetype besides
-  /// (if applicable) just drilling down from its parent.
-  ///
-  /// This is necessary when an archetype gains conformances from an
-  /// associated type that it's been constrained to be equal to
-  /// but which is not simply its parent.
-  void addArchetypeAccessPath(CanArchetypeType targetArchetype,
-                              ArchetypeAccessPath accessPath);
-
-  ArrayRef<ArchetypeAccessPath>
-  getArchetypeAccessPaths(CanArchetypeType targetArchetype);
-
 //--- Type emission ------------------------------------------------------------
 public:
   /// Look up a local type data reference, returning null if no entry was
@@ -581,9 +568,6 @@ private:
   llvm::Value *LocalSelf = nullptr;
   
   LocalSelfKind SelfKind;
-
-  llvm::DenseMap<CanType, std::vector<ArchetypeAccessPath>>
-  ArchetypeAccessPaths;
 };
 
 using ConditionalDominanceScope = IRGenFunction::ConditionalDominanceScope;

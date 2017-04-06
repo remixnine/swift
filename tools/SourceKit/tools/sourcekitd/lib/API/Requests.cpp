@@ -35,6 +35,7 @@
 #include "llvm/Support/MemoryBuffer.h"
 #include "llvm/Support/Path.h"
 #include "llvm/Support/raw_ostream.h"
+#include "llvm/Support/TargetSelect.h"
 #include <mutex>
 
 // FIXME: Portability.
@@ -110,6 +111,7 @@ static LazySKDUID RequestBuildSettingsRegister(
 static LazySKDUID RequestModuleGroups(
     "source.request.module.groups");
 static LazySKDUID RequestNameTranslation("source.request.name.translation");
+static LazySKDUID RequestMarkupToXML("source.request.convert.markup.xml");
 
 static LazySKDUID KindExpr("source.lang.swift.expr");
 static LazySKDUID KindStmt("source.lang.swift.stmt");
@@ -148,6 +150,11 @@ static void onDocumentUpdateNotification(StringRef DocumentName) {
 static SourceKit::Context *GlobalCtx = nullptr;
 
 void sourcekitd::initialize() {
+  llvm::InitializeAllTargets();
+  llvm::InitializeAllTargetMCs();
+  llvm::InitializeAllAsmPrinters();
+  llvm::InitializeAllAsmParsers();
+
   GlobalCtx = new SourceKit::Context(sourcekitd::getRuntimeLibPath(),
                                      SourceKit::createSwiftLangSupport);
   GlobalCtx->getNotificationCenter().addDocumentUpdateNotificationReceiver(
@@ -230,6 +237,8 @@ editorOpenSwiftTypeInterface(StringRef TypeUsr, ArrayRef<const char *> Args,
                              ResponseReceiver Rec);
 
 static sourcekitd_response_t editorExtractTextFromComment(StringRef Source);
+
+static sourcekitd_response_t editorConvertMarkupToXML(StringRef Source);
 
 static sourcekitd_response_t
 editorClose(StringRef Name, bool RemoveCache);
@@ -543,6 +552,13 @@ void handleRequestImpl(sourcekitd_object_t ReqObj, ResponseReceiver Rec) {
     return Rec(editorExtractTextFromComment(Source.getValue()));
   }
 
+  if (ReqUID == RequestMarkupToXML) {
+    Optional<StringRef> Source = Req.getString(KeySourceText);
+    if (!Source.hasValue())
+      return Rec(createErrorRequestInvalid("missing 'key.sourcetext'"));
+    return Rec(editorConvertMarkupToXML(Source.getValue()));
+  }
+
   if (ReqUID == RequestEditorFindUSR) {
     Optional<StringRef> Name = Req.getString(KeySourceFile);
     if (!Name.hasValue())
@@ -800,13 +816,14 @@ handleSemanticRequest(RequestDict Req,
       return Rec(createErrorRequestInvalid("cannot specify 'key.selectorpieces' "
                                            "and 'key.argnames' at the same time"));
     }
-    Input.ArgNames.resize(ArgParts.size() + Selectors.size());
-    std::transform(ArgParts.begin(), ArgParts.end(), Input.ArgNames.begin(),
+    std::transform(ArgParts.begin(), ArgParts.end(),
+                   std::back_inserter(Input.ArgNames),
       [](const char *C) {
         StringRef Original(C);
         return Original == "_" ? StringRef() : Original;
       });
-    std::transform(Selectors.begin(), Selectors.end(), Input.ArgNames.begin(),
+    std::transform(Selectors.begin(), Selectors.end(),
+                   std::back_inserter(Input.ArgNames),
                    [](const char *C) { return StringRef(C); });
     return Lang.getNameInfo(*SourceFile, Offset, Input, Args,
       [Rec](const NameTranslatingInfo &Info) { reportNameInfo(Info, Rec); });
@@ -1154,7 +1171,7 @@ static std::string mangleSimpleClass(StringRef moduleName,
   typeNode->addChild(classNode, Dem);
   typeManglingNode->addChild(typeNode, Dem);
   globalNode->addChild(typeManglingNode, Dem);
-  return mangleNode(globalNode, swift::useNewMangling(globalNode));
+  return mangleNode(globalNode);
 }
 
 static sourcekitd_response_t
@@ -1418,6 +1435,9 @@ static void reportCursorInfo(const CursorInfo &Info, ResponseReceiver Rec) {
       auto Entry = Actions.appendDictionary();
       Entry.set(KeyActionName, Name);
     }
+  }
+  if (Info.ParentNameOffset) {
+    Elem.set(KeyParentLoc, Info.ParentNameOffset.getValue());
   }
   if (!Info.AnnotatedRelatedDeclarations.empty()) {
     auto RelDecls = Elem.setArray(KeyRelatedDecls);
@@ -1981,6 +2001,16 @@ static sourcekitd_response_t editorExtractTextFromComment(StringRef Source) {
                          /*SyntacticOnly=*/true);
   LangSupport &Lang = getGlobalContext().getSwiftLangSupport();
   Lang.editorExtractTextFromComment(Source, EditC);
+  return EditC.createResponse();
+}
+
+static sourcekitd_response_t editorConvertMarkupToXML(StringRef Source) {
+  SKEditorConsumer EditC(/*EnableSyntaxMap=*/false,
+                         /*EnableStructure=*/false,
+                         /*EnableDiagnostics=*/false,
+                         /*SyntacticOnly=*/true);
+  LangSupport &Lang = getGlobalContext().getSwiftLangSupport();
+  Lang.editorConvertMarkupToXML(Source, EditC);
   return EditC.createResponse();
 }
 

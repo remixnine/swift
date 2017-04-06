@@ -377,34 +377,9 @@ bool GenericSignature::enumeratePairedRequirements(
   return enumerateGenericParamsUpToDependentType(CanType());
 }
 
-void GenericSignature::populateParentMap(SubstitutionMap &subMap) const {
-  for (auto reqt : getRequirements()) {
-    if (reqt.getKind() != RequirementKind::SameType)
-      continue;
-
-    auto first = reqt.getFirstType();
-    auto second = reqt.getSecondType();
-
-    if (!first->isTypeParameter() || !second->isTypeParameter())
-      continue;
-
-    if (auto *firstMemTy = first->getAs<DependentMemberType>()) {
-      subMap.addParent(second->getCanonicalType(),
-                       firstMemTy->getBase()->getCanonicalType(),
-                       firstMemTy->getAssocType());
-    }
-
-    if (auto *secondMemTy = second->getAs<DependentMemberType>()) {
-      subMap.addParent(first->getCanonicalType(),
-                       secondMemTy->getBase()->getCanonicalType(),
-                       secondMemTy->getAssocType());
-    }
-  }
-}
-
 SubstitutionMap
 GenericSignature::getSubstitutionMap(SubstitutionList subs) const {
-  SubstitutionMap result;
+  SubstitutionMap result(const_cast<GenericSignature *>(this));
 
   enumeratePairedRequirements(
     [&](Type depTy, ArrayRef<Requirement> reqts) -> bool {
@@ -423,7 +398,7 @@ GenericSignature::getSubstitutionMap(SubstitutionList subs) const {
     });
 
   assert(subs.empty() && "did not use all substitutions?!");
-  populateParentMap(result);
+  result.verify();
   return result;
 }
 
@@ -431,7 +406,7 @@ SubstitutionMap
 GenericSignature::
 getSubstitutionMap(TypeSubstitutionFn subs,
                    GenericSignature::LookupConformanceFn lookupConformance) const {
-  SubstitutionMap subMap;
+  SubstitutionMap subMap(const_cast<GenericSignature *>(this));
 
   // Enumerate all of the requirements that require substitution.
   enumeratePairedRequirements([&](Type depTy, ArrayRef<Requirement> reqs) {
@@ -457,7 +432,7 @@ getSubstitutionMap(TypeSubstitutionFn subs,
     return false;
   });
 
-  populateParentMap(subMap);
+  subMap.verify();
   return subMap;
 }
 
@@ -528,7 +503,7 @@ bool GenericSignature::requiresClass(Type type, ModuleDecl &mod) {
 
   // If any of the protocols are class-bound, then it must be a class.
   for (auto proto : pa->getConformsTo()) {
-    if (proto.first->requiresClass()) return true;
+    if (proto->requiresClass()) return true;
   }
 
   return false;
@@ -571,12 +546,34 @@ SmallVector<ProtocolDecl *, 2> GenericSignature::getConformsTo(Type type,
   // Retrieve the protocols to which this type conforms.
   SmallVector<ProtocolDecl *, 2> result;
   for (auto proto : pa->getConformsTo())
-    result.push_back(proto.first);
+    result.push_back(proto);
 
   // Canonicalize the resulting set of protocols.
   ProtocolType::canonicalizeProtocols(result);
 
   return result;
+}
+
+bool GenericSignature::conformsToProtocol(Type type, ProtocolDecl *proto,
+                                          ModuleDecl &mod) {
+  // FIXME: Deal with concrete conformances here?
+  if (!type->isTypeParameter()) return false;
+
+  auto &builder = *getGenericSignatureBuilder(mod);
+  auto pa = builder.resolveArchetype(type);
+  if (!pa) return false;
+
+  pa = pa->getRepresentative();
+
+  // FIXME: Deal with concrete conformances here?
+  if (pa->isConcreteType()) return false;
+
+  // Check whether the representative conforms to this protocol.
+  if (auto equivClass = pa->getEquivalenceClassIfPresent())
+    if (equivClass->conformsTo.count(proto) > 0)
+      return true;
+
+  return false;
 }
 
 /// Determine whether the given dependent type is equal to a concrete type.
@@ -738,6 +735,26 @@ static Type eraseAssociatedTypes(Type type) {
   return type;
 }
 
+namespace {
+  typedef GenericSignatureBuilder::RequirementSource RequirementSource;
+
+  template<typename T>
+  using GSBConstraint = GenericSignatureBuilder::Constraint<T>;
+}
+
+/// Retrieve the best requirement source from the list
+static const RequirementSource *
+getBestRequirementSource(ArrayRef<GSBConstraint<ProtocolDecl *>> constraints) {
+  const RequirementSource *bestSource = nullptr;
+  for (const auto &constraint : constraints) {
+    auto source = constraint.source;
+    if (!bestSource || source->compare(bestSource) < 0)
+      bestSource = source;
+  }
+
+  return bestSource;
+}
+
 ConformanceAccessPath GenericSignature::getConformanceAccessPath(
                                                        Type type,
                                                        ProtocolDecl *protocol,
@@ -747,12 +764,12 @@ ConformanceAccessPath GenericSignature::getConformanceAccessPath(
   // Resolve this type to a potential archetype.
   auto &builder = *getGenericSignatureBuilder(mod);
   auto pa = builder.resolveArchetype(type);
-  auto rep = pa->getRepresentative();
+  auto equivClass = pa->getOrCreateEquivalenceClass();
 
   // Dig out the conformance of this type to the given protocol, because we
   // want its requirement source.
-  auto conforms = rep->getConformsTo().find(protocol);
-  assert(conforms != rep->getConformsTo().end());
+  auto conforms = equivClass->conformsTo.find(protocol);
+  assert(conforms != equivClass->conformsTo.end());
 
   // Follow the requirement source to form the conformance access path.
   typedef GenericSignatureBuilder::RequirementSource RequirementSource;
@@ -797,7 +814,7 @@ ConformanceAccessPath GenericSignature::getConformanceAccessPath(
       // If this step was computed via the requirement signature, add it
       // directly.
       if (source->usesRequirementSignature) {
-        // Add this step along the path, which involes looking for the
+        // Add this step along the path, which involves looking for the
         // conformance we want (\c conformingProto) within the protocol
         // described by this source.
 
@@ -837,16 +854,17 @@ ConformanceAccessPath GenericSignature::getConformanceAccessPath(
 
       // Dig out the potential archetype for this stored type.
       auto pa = reqSigBuilder.resolveArchetype(storedType);
-      auto rep = pa->getRepresentative();
+      auto equivClass = pa->getOrCreateEquivalenceClass();
 
       // Find the conformance of this potential archetype to the protocol in
       // question.
-      auto knownConforms = rep->getConformsTo().find(conformingProto);
-      assert(knownConforms != rep->getConformsTo().end());
+      auto conforms = equivClass->conformsTo.find(conformingProto);
+      assert(conforms != equivClass->conformsTo.end());
 
       // Compute the root type, canonicalizing it w.r.t. the protocol context.
       auto inProtoSig = inProtocol->getGenericSignature();
-      Type localRootType = knownConforms->second->getRootPotentialArchetype()
+      auto conformsSource = getBestRequirementSource(conforms->second);
+      Type localRootType = conformsSource->getRootPotentialArchetype()
                              ->getDependentType(inProtoSig->getGenericParams(),
                                                 /*allowUnresolved*/true);
       localRootType = inProtoSig->getCanonicalTypeInContext(
@@ -854,7 +872,7 @@ ConformanceAccessPath GenericSignature::getConformanceAccessPath(
                                                *inProtocol->getModuleContext());
 
       // Build the path according to the requirement signature.
-      buildPath(reqSig, knownConforms->second, conformingProto, localRootType);
+      buildPath(reqSig, conformsSource, conformingProto, localRootType);
 
       // We're done.
       return;
@@ -884,14 +902,14 @@ ConformanceAccessPath GenericSignature::getConformanceAccessPath(
   };
 
   // Canonicalize the root type.
-  auto source = conforms->second;
+  auto source = getBestRequirementSource(conforms->second);
   auto subjectPA = source->getRootPotentialArchetype();
   subjectPA = subjectPA->getArchetypeAnchor(*subjectPA->getBuilder());
   Type rootType = subjectPA->getDependentType(getGenericParams(),
                                               /*allowUnresolved=*/false);
 
   // Build the path.
-  buildPath(this, conforms->second, protocol, rootType);
+  buildPath(this, source, protocol, rootType);
 
   // Return the path; we're done!
   return path;

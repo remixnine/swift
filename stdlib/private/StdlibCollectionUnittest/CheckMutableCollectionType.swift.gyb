@@ -68,15 +68,15 @@ internal func _mapInPlace<C : MutableCollection>(
 }
 
 internal func makeBufferAccessLoggingMutableCollection<
-  C : MutableCollection & BidirectionalCollection
+  C
 >(wrapping c: C) -> BufferAccessLoggingMutableBidirectionalCollection<C> {
   return BufferAccessLoggingMutableBidirectionalCollection(wrapping: c)
 }
 
 internal func makeBufferAccessLoggingMutableCollection<
-  C : MutableCollection & RandomAccessCollection
->(wrapping c: C) -> BufferAccessLoggingMutableBidirectionalCollection<C> {
-  return BufferAccessLoggingMutableBidirectionalCollection(wrapping: c)
+  C
+>(wrapping c: C) -> BufferAccessLoggingMutableRandomAccessCollection<C> {
+  return BufferAccessLoggingMutableRandomAccessCollection(wrapping: c)
 }
 
 extension TestSuite {
@@ -115,7 +115,6 @@ extension TestSuite {
     C.Indices.Index == C.Index,
     C.Indices.SubSequence == C.Indices,
     CollectionWithEquatableElement.Iterator.Element : Equatable,
-    CollectionWithEquatableElement.SubSequence : Collection,
     CollectionWithEquatableElement.SubSequence.Iterator.Element
       == CollectionWithEquatableElement.Iterator.Element,
     CollectionWithComparableElement.Iterator.Element : Comparable {
@@ -708,7 +707,6 @@ self.test("\(testNamePrefix).partition/InvalidOrderings") {
     C.Indices.Index == C.Index,
     C.Indices.SubSequence == C.Indices,
     CollectionWithEquatableElement.Iterator.Element : Equatable,
-    CollectionWithEquatableElement.SubSequence : Collection,
     CollectionWithEquatableElement.SubSequence.Iterator.Element
       == CollectionWithEquatableElement.Iterator.Element,
     CollectionWithComparableElement.Iterator.Element : Comparable {
@@ -864,7 +862,6 @@ self.test("\(testNamePrefix).partition/DispatchesThrough_withUnsafeMutableBuffer
     C.Indices.Index == C.Index,
     C.Indices.SubSequence == C.Indices,
     CollectionWithEquatableElement.Iterator.Element : Equatable,
-    CollectionWithEquatableElement.SubSequence : Collection,
     CollectionWithEquatableElement.SubSequence.Iterator.Element
       == CollectionWithEquatableElement.Iterator.Element,
     CollectionWithComparableElement.Iterator.Element : Comparable,

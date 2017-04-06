@@ -14,13 +14,13 @@
 #define SWIFT_IRGEN_IRGENMANGLER_H
 
 #include "swift/AST/ASTMangler.h"
-#include "ValueWitness.h"
+#include "swift/IRGen/ValueWitness.h"
 
 namespace swift {
 namespace irgen {
 
 /// The mangler for all kind of symbols produced in IRGen.
-class IRGenMangler : public NewMangling::ASTMangler {
+class IRGenMangler : public Mangle::ASTMangler {
 public:
   IRGenMangler() { }
 

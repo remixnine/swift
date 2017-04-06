@@ -101,6 +101,7 @@ static sourcekitd_uid_t KeyFilePath;
 static sourcekitd_uid_t KeyModuleInterfaceName;
 static sourcekitd_uid_t KeyLength;
 static sourcekitd_uid_t KeyActionable;
+static sourcekitd_uid_t KeyParentLoc;
 static sourcekitd_uid_t KeySourceText;
 static sourcekitd_uid_t KeyUSR;
 static sourcekitd_uid_t KeyOriginalUSR;
@@ -118,6 +119,7 @@ static sourcekitd_uid_t KeyEnableSyntaxMap;
 static sourcekitd_uid_t KeyEnableSubStructure;
 static sourcekitd_uid_t KeySyntacticOnly;
 static sourcekitd_uid_t KeyLine;
+static sourcekitd_uid_t KeyColumn;
 static sourcekitd_uid_t KeyFormatOptions;
 static sourcekitd_uid_t KeyCodeCompleteOptions;
 static sourcekitd_uid_t KeyAnnotations;
@@ -166,6 +168,7 @@ static sourcekitd_uid_t RequestEditorFindInterfaceDoc;
 static sourcekitd_uid_t RequestDocInfo;
 static sourcekitd_uid_t RequestModuleGroups;
 static sourcekitd_uid_t RequestNameTranslation;
+static sourcekitd_uid_t RequestMarkupToXML;
 
 static sourcekitd_uid_t SemaDiagnosticStage;
 
@@ -225,6 +228,7 @@ static int skt_main(int argc, const char **argv) {
   KeyModuleInterfaceName = sourcekitd_uid_get_from_cstr("key.module_interface_name");
   KeyLength = sourcekitd_uid_get_from_cstr("key.length");
   KeyActionable = sourcekitd_uid_get_from_cstr("key.actionable");
+  KeyParentLoc = sourcekitd_uid_get_from_cstr("key.parent_loc");;
   KeySourceText = sourcekitd_uid_get_from_cstr("key.sourcetext");
   KeyUSR = sourcekitd_uid_get_from_cstr("key.usr");
   KeyOriginalUSR = sourcekitd_uid_get_from_cstr("key.original_usr");
@@ -243,6 +247,7 @@ static int skt_main(int argc, const char **argv) {
   KeyEnableSubStructure = sourcekitd_uid_get_from_cstr("key.enablesubstructure");
   KeySyntacticOnly = sourcekitd_uid_get_from_cstr("key.syntactic_only");
   KeyLine = sourcekitd_uid_get_from_cstr("key.line");
+  KeyColumn = sourcekitd_uid_get_from_cstr("key.column");
   KeyFormatOptions = sourcekitd_uid_get_from_cstr("key.editor.format.options");
   KeyCodeCompleteOptions =
       sourcekitd_uid_get_from_cstr("key.codecomplete.options");
@@ -297,6 +302,7 @@ static int skt_main(int argc, const char **argv) {
   RequestDocInfo = sourcekitd_uid_get_from_cstr("source.request.docinfo");
   RequestModuleGroups = sourcekitd_uid_get_from_cstr("source.request.module.groups");
   RequestNameTranslation = sourcekitd_uid_get_from_cstr("source.request.name.translation");
+  RequestMarkupToXML = sourcekitd_uid_get_from_cstr("source.request.convert.markup.xml");
   KindNameObjc = sourcekitd_uid_get_from_cstr("source.lang.name.kind.objc");
   KindNameSwift = sourcekitd_uid_get_from_cstr("source.lang.name.kind.swift");
 
@@ -578,7 +584,10 @@ static int handleTestInvocation(ArrayRef<const char *> Args,
     sourcekitd_request_dictionary_set_int64(Req, KeyLength, Length);
     break;
   }
-
+  case SourceKitRequest::MarkupToXML: {
+    sourcekitd_request_dictionary_set_uid(Req, KeyRequest, RequestMarkupToXML);
+    break;
+  }
   case SourceKitRequest::NameTranslation: {
     sourcekitd_request_dictionary_set_uid(Req, KeyRequest, RequestNameTranslation);
     sourcekitd_request_dictionary_set_int64(Req, KeyOffset, ByteOffset);
@@ -932,6 +941,7 @@ static bool handleResponse(sourcekitd_response_t Resp, const TestOptions &Opts,
       break;
 
     case SourceKitRequest::ExtractComment:
+    case SourceKitRequest::MarkupToXML:
       printNormalizedDocComment(Info);
       break;
 
@@ -1259,6 +1269,9 @@ static void printCursorInfo(sourcekitd_variant_t Info, StringRef FilenameIn,
                                                                 KeyActionName));
   }
 
+  uint64_t ParentOffset =
+    sourcekitd_variant_dictionary_get_int64(Info, KeyParentLoc);
+
   OS << Kind << " (";
   if (Offset.hasValue()) {
     if (Filename != FilePath)
@@ -1315,6 +1328,9 @@ static void printCursorInfo(sourcekitd_variant_t Info, StringRef FilenameIn,
   for (auto Action : AvailableActions)
     OS << Action << '\n';
   OS << "ACTIONS END\n";
+  if (ParentOffset) {
+    OS << "PARENT OFFSET: " << ParentOffset << "\n";
+  }
 }
 
 static void printRangeInfo(sourcekitd_variant_t Info, StringRef FilenameIn,

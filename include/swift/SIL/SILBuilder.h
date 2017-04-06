@@ -26,6 +26,8 @@ namespace swift {
 using Atomicity = RefCountingInst::Atomicity;
 
 class SILDebugScope;
+class IntegerLiteralExpr;
+class FloatLiteralExpr;
 
 class SILBuilder {
   friend class SILBuilderWithScope;
@@ -425,9 +427,8 @@ public:
                       GlobalAddrInst(getSILDebugLocation(Loc), g));
   }
 
-  IntegerLiteralInst *createIntegerLiteral(IntegerLiteralExpr *E) {
-    return insert(IntegerLiteralInst::create(E, getSILDebugLocation(E), F));
-  }
+  IntegerLiteralInst *createIntegerLiteral(IntegerLiteralExpr *E);
+
   IntegerLiteralInst *createIntegerLiteral(SILLocation Loc, SILType Ty,
                                            intmax_t Value) {
     return insert(
@@ -439,9 +440,8 @@ public:
         IntegerLiteralInst::create(getSILDebugLocation(Loc), Ty, Value, F));
   }
 
-  FloatLiteralInst *createFloatLiteral(FloatLiteralExpr *E) {
-    return insert(FloatLiteralInst::create(E, getSILDebugLocation(E), F));
-  }
+  FloatLiteralInst *createFloatLiteral(FloatLiteralExpr *E);
+
   FloatLiteralInst *createFloatLiteral(SILLocation Loc, SILType Ty,
                                        const APFloat &Value) {
     return insert(
@@ -527,6 +527,19 @@ public:
                                                  SILValue Arg) {
     return insert(new (F.getModule()) EndBorrowArgumentInst(
         getSILDebugLocation(Loc), cast<SILArgument>(Arg)));
+  }
+
+  BeginAccessInst *createBeginAccess(SILLocation loc, SILValue address,
+                                     SILAccessKind accessKind,
+                                     SILAccessEnforcement enforcement) {
+    return insert(new (F.getModule()) BeginAccessInst(
+        getSILDebugLocation(loc), address, accessKind, enforcement));
+  }
+
+  EndAccessInst *createEndAccess(SILLocation loc, SILValue address,
+                                 bool aborted) {
+    return insert(new (F.getModule()) EndAccessInst(
+        getSILDebugLocation(loc), address, aborted));
   }
 
   AssignInst *createAssign(SILLocation Loc, SILValue Src, SILValue DestAddr) {
@@ -801,10 +814,12 @@ public:
   }
 
   UnconditionalCheckedCastValueInst *
-  createUnconditionalCheckedCastValue(SILLocation Loc, SILValue op,
-                                      SILType destTy) {
+  createUnconditionalCheckedCastValue(SILLocation Loc,
+                                      CastConsumptionKind consumption,
+                                      SILValue op, SILType destTy) {
     return insert(UnconditionalCheckedCastValueInst::create(
-        getSILDebugLocation(Loc), op, destTy, F, OpenedArchetypes));
+        getSILDebugLocation(Loc), consumption, op, destTy, F,
+        OpenedArchetypes));
   }
 
   RetainValueInst *createRetainValue(SILLocation Loc, SILValue operand,

@@ -1,5 +1,5 @@
-// RUN: %target-swift-frontend -Xllvm -new-mangling-for-tests -Xllvm -sil-full-demangle -emit-silgen %s | %FileCheck %s
-// RUN: %target-swift-frontend -Xllvm -new-mangling-for-tests -Xllvm -sil-full-demangle -emit-silgen %s | %FileCheck %s --check-prefix=GUARANTEED
+// RUN: %target-swift-frontend -Xllvm -sil-full-demangle -emit-silgen %s | %FileCheck %s
+// RUN: %target-swift-frontend -Xllvm -sil-full-demangle -emit-silgen %s | %FileCheck %s --check-prefix=GUARANTEED
 
 func test_type_lowering(_ x: Error) { }
 // CHECK-LABEL: sil hidden @_T018boxed_existentials18test_type_loweringys5Error_pF : $@convention(thin) (@owned Error) -> () {
@@ -98,7 +98,7 @@ func test_property_of_lvalue(_ x: Error) -> String {
 // CHECK:         return [[RESULT]]
 // CHECK:      } // end sil function '_T018boxed_existentials23test_property_of_lvalueSSs5Error_pF'
 extension Error {
-  final func extensionMethod() { }
+  func extensionMethod() { }
 }
 
 // CHECK-LABEL: sil hidden @_T018boxed_existentials21test_extension_methodys5Error_pF

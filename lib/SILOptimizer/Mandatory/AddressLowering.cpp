@@ -433,7 +433,8 @@ void OpaqueStorageAllocation::convertIndirectFunctionArgs() {
 
       loadArg->setOperand(arg);
 
-      pass.valueStorageMap.insertValue(loadArg).storageAddress = arg;
+      if (addrType.isAddressOnly(pass.F->getModule()))
+        pass.valueStorageMap.insertValue(loadArg).storageAddress = arg;
     }
     ++argIdx;
   }
@@ -1406,6 +1407,7 @@ static void rewriteFunction(AddressLoweringState &pass) {
 
   for (auto &valueStorageI : pass.valueStorageMap) {
     SILValue valueDef = valueStorageI.first;
+
     if (auto *defInst = dyn_cast<SILInstruction>(valueDef))
       defVisitor.visitInst(defInst);
 
@@ -1470,7 +1472,7 @@ void AddressLowering::runOnFunction(SILFunction *F) {
   // Rewrite instructions with address-only operands or results.
   rewriteFunction(pass);
 
-  invalidateAnalysis(SILAnalysis::InvalidationKind::Instructions);
+  invalidateAnalysis(F, SILAnalysis::InvalidationKind::Instructions);
 
   // Instructions that were explicitly marked dead should already have no
   // users.

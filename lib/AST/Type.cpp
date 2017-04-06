@@ -16,13 +16,14 @@
 
 #include "swift/AST/Types.h"
 #include "ForeignRepresentationInfo.h"
+#include "swift/AST/ASTContext.h"
 #include "swift/AST/TypeVisitor.h"
 #include "swift/AST/TypeWalker.h"
 #include "swift/AST/Decl.h"
-#include "swift/AST/AST.h"
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/LazyResolver.h"
 #include "swift/AST/Module.h"
+#include "swift/AST/ParameterList.h"
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/SubstitutionMap.h"
 #include "swift/AST/TypeLoc.h"
@@ -206,37 +207,9 @@ bool TypeBase::allowsOwnership() {
   return getCanonicalType().isAnyClassReferenceType();
 }
 
-bool TypeBase::isAnyExistentialType(SmallVectorImpl<ProtocolDecl*> &protocols) {
-  return getCanonicalType().isAnyExistentialType(protocols);
-}
-
-bool CanType::isAnyExistentialTypeImpl(CanType type,
-                                       SmallVectorImpl<ProtocolDecl*> &protocols) {
-  if (auto metatype = dyn_cast<ExistentialMetatypeType>(type)) {
-    metatype.getInstanceType().getAnyExistentialTypeProtocols(protocols);
-    return true;
-  }
-  return isExistentialTypeImpl(type, protocols);
-}
-
-bool TypeBase::isExistentialType(SmallVectorImpl<ProtocolDecl *> &protocols) {
-  return getCanonicalType().isExistentialType(protocols);
-}
-
-bool CanType::isExistentialTypeImpl(CanType type,
-                                    SmallVectorImpl<ProtocolDecl*> &protocols) {
-  if (auto proto = dyn_cast<ProtocolType>(type)) {
-    proto.getAnyExistentialTypeProtocols(protocols);
-    return true;
-  }
-  
-  if (auto comp = dyn_cast<ProtocolCompositionType>(type)) {
-    comp.getAnyExistentialTypeProtocols(protocols);
-    return true;
-  }
-
-  assert(!type.isExistentialType());
-  return false;
+void TypeBase::getExistentialTypeProtocols(
+                                   SmallVectorImpl<ProtocolDecl*> &protocols) {
+  getCanonicalType().getExistentialTypeProtocols(protocols);
 }
 
 void TypeBase::getAnyExistentialTypeProtocols(
@@ -244,17 +217,27 @@ void TypeBase::getAnyExistentialTypeProtocols(
   getCanonicalType().getAnyExistentialTypeProtocols(protocols);
 }
 
-void CanType::getAnyExistentialTypeProtocolsImpl(CanType type,
+void CanType::getExistentialTypeProtocolsImpl(CanType type,
                                    SmallVectorImpl<ProtocolDecl*> &protocols) {
   if (auto proto = dyn_cast<ProtocolType>(type)) {
-    proto.getAnyExistentialTypeProtocols(protocols);
+    protocols.push_back(proto->getDecl());
   } else if (auto comp = dyn_cast<ProtocolCompositionType>(type)) {
-    comp.getAnyExistentialTypeProtocols(protocols);
-  } else if (auto metatype = dyn_cast<ExistentialMetatypeType>(type)) {
-    metatype.getAnyExistentialTypeProtocols(protocols);
+    auto protos = comp.getProtocols();
+    for (auto proto : protos)
+      proto.getExistentialTypeProtocols(protocols);
   } else {
     llvm_unreachable("type was not any kind of existential type!");
   }
+}
+
+void CanType::getAnyExistentialTypeProtocolsImpl(CanType type,
+                                   SmallVectorImpl<ProtocolDecl*> &protocols) {
+  if (auto metatype = dyn_cast<ExistentialMetatypeType>(type)) {
+      metatype.getInstanceType().getAnyExistentialTypeProtocols(protocols);
+      return;
+  }
+
+  type.getExistentialTypeProtocols(protocols);
 }
 
 bool TypeBase::isObjCExistentialType() {
@@ -265,7 +248,7 @@ bool CanType::isObjCExistentialTypeImpl(CanType type) {
   if (!type.isExistentialType()) return false;
 
   SmallVector<ProtocolDecl *, 4> protocols;
-  type.getAnyExistentialTypeProtocols(protocols);
+  type.getExistentialTypeProtocols(protocols);
 
   // Must have at least one protocol to be class-bounded.
   if (protocols.empty())
@@ -557,10 +540,14 @@ bool TypeBase::isAnyObject() {
 }
 
 bool TypeBase::isExistentialWithError() {
+  auto canTy = getCanonicalType();
+
+  if (!canTy.isExistentialType()) return false;
+
   // FIXME: Compute this as a bit in TypeBase so this operation isn't
   // overly expensive.
   SmallVector<ProtocolDecl *, 4> protocols;
-  if (!getCanonicalType()->isExistentialType(protocols)) return false;
+  canTy.getExistentialTypeProtocols(protocols);
 
   auto errorProto =
     getASTContext().getProtocol(KnownProtocolKind::Error);
@@ -781,19 +768,15 @@ swift::decomposeParamType(Type type, const ValueDecl *paramOwner,
 std::string swift::getParamListAsString(ArrayRef<CallArgParam> params) {
   std::string result = "(";
 
-  bool isFirst = true;
-  for (auto &param : params) {
-    if (isFirst)
-      isFirst = false;
-    else
-      result += ", ";
-
-    if (param.hasLabel())
-      result += param.Label.str();
-    else
-      result += "_";
-    result += ":";
-  }
+  interleave(params,
+             [&](const CallArgParam &param) {
+               if (param.hasLabel())
+                 result += param.Label.str();
+               else
+                 result += "_";
+               result += ":";
+             },
+             [&] { result += ", "; });
 
   result += ')';
   return result;
@@ -1086,8 +1069,8 @@ CanType TypeBase::getCanonicalType() {
     // Transform the input and result types.
     auto &ctx = function->getInput()->getASTContext();
     auto &mod = *ctx.TheBuiltinModule;
-    auto inputTy = sig->getCanonicalTypeInContext(function->getInput(), mod);
-    auto resultTy = sig->getCanonicalTypeInContext(function->getResult(), mod);
+    auto inputTy = function->getInput()->getCanonicalType(sig, mod);
+    auto resultTy = function->getResult()->getCanonicalType(sig, mod);
 
     Result = GenericFunctionType::get(sig, inputTy, resultTy,
                                       function->getExtInfo());
@@ -1171,6 +1154,36 @@ CanType TypeBase::getCanonicalType() {
   return CanType(Result);
 }
 
+CanType TypeBase::getCanonicalType(GenericSignature *sig,
+                                   ModuleDecl &mod) {
+  if (!sig)
+    return getCanonicalType();
+
+  return sig->getCanonicalTypeInContext(this, mod);
+}
+
+TypeBase *TypeBase::reconstituteSugar(bool Recursive) {
+  auto Func = [](Type Ty) -> Type {
+    if (auto boundGeneric = dyn_cast<BoundGenericType>(Ty.getPointer())) {
+      auto &ctx = boundGeneric->getASTContext();
+      if (boundGeneric->getDecl() == ctx.getArrayDecl())
+        return ArraySliceType::get(boundGeneric->getGenericArgs()[0]);
+      if (boundGeneric->getDecl() == ctx.getDictionaryDecl())
+        return DictionaryType::get(boundGeneric->getGenericArgs()[0],
+                                   boundGeneric->getGenericArgs()[1]);
+      if (boundGeneric->getDecl() == ctx.getOptionalDecl())
+        return OptionalType::get(boundGeneric->getGenericArgs()[0]);
+      if (boundGeneric->getDecl() == ctx.getImplicitlyUnwrappedOptionalDecl())
+        return ImplicitlyUnwrappedOptionalType::
+        get(boundGeneric->getGenericArgs()[0]);
+    }
+    return Ty;
+  };
+  if (Recursive)
+    return Type(this).transform(Func).getPointer();
+  else
+    return Func(this).getPointer();
+}
 
 TypeBase *TypeBase::getDesugaredType() {
   switch (getKind()) {
@@ -2661,14 +2674,6 @@ bool ProtocolType::requiresClass() const {
   return getDecl()->requiresClass();
 }
 
-void ProtocolCompositionType::getAnyExistentialTypeProtocols(
-                                   SmallVectorImpl<ProtocolDecl *> &protos) {
-  // The canonical type for a protocol composition canonicalizes the
-  // order of the protocols.
-  auto canonical = cast<ProtocolCompositionType>(getCanonicalType());
-  canonical.getAnyExistentialTypeProtocols(protos);
-}
-
 bool ProtocolCompositionType::requiresClass() const {
   for (Type t : getProtocols()) {
     if (const ProtocolType *proto = t->getAs<ProtocolType>()) {
@@ -2813,8 +2818,8 @@ static Type getMemberForBaseType(LookupConformanceFn lookupConformances,
         !conformance->getConcrete()->hasTypeWitness(assocType, nullptr))
       return failed();
 
-    auto witness = conformance->getConcrete()
-        ->getTypeWitness(assocType, resolver).getReplacement();
+    auto witness =
+      conformance->getConcrete()->getTypeWitness(assocType, resolver);
 
     // This is a hacky feature allowing code completion to migrate to
     // using Type::subst() without changing output.
@@ -2848,7 +2853,17 @@ Optional<ProtocolConformanceRef>
 LookUpConformanceInSubstitutionMap::operator()(CanType dependentType,
                                        Type conformingReplacementType,
                                        ProtocolType *conformedProtocol) const {
-  return Subs.lookupConformance(dependentType, conformedProtocol->getDecl());
+  auto result = Subs.lookupConformance(dependentType, conformedProtocol->getDecl());
+  if ((result && result->isConcrete()) ||
+      conformingReplacementType->hasError() ||
+      conformingReplacementType->isTypeParameter())
+    return result;
+
+  // FIXME: Rip this out once ConformanceAccessPaths are plumbed through
+  auto *M = conformedProtocol->getDecl()->getParentModule();
+  return M->lookupConformance(conformingReplacementType,
+                              conformedProtocol->getDecl(),
+                              nullptr);
 }
 
 Optional<ProtocolConformanceRef>
@@ -3203,6 +3218,13 @@ Type TypeBase::adjustSuperclassMemberDeclType(const ValueDecl *baseDecl,
                                               LazyResolver *resolver) {
   auto subs = SubstitutionMap::getOverrideSubstitutions(
       baseDecl, derivedDecl, /*derivedSubs=*/None, resolver);
+
+  if (auto *genericMemberType = memberType->getAs<GenericFunctionType>()) {
+    memberType = FunctionType::get(genericMemberType->getInput(),
+                                   genericMemberType->getResult(),
+                                   genericMemberType->getExtInfo());
+  }
+
   auto type = memberType.subst(subs);
 
   if (isa<AbstractFunctionDecl>(baseDecl)) {

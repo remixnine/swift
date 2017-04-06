@@ -197,8 +197,12 @@ protected:
 
     /// Whether the name is implicit, produced as the result of caching.
     unsigned ImplicitName : 1;
+
+    /// Whether the @objc was inferred using Swift 3's deprecated inference
+    /// rules.
+    unsigned Swift3Inferred : 1;
   };
-  enum { NumObjCAttrBits = NumDeclAttrBits + 2 };
+  enum { NumObjCAttrBits = NumDeclAttrBits + 3 };
   static_assert(NumObjCAttrBits <= 32, "fits in an unsigned");
 
   class AccessibilityAttrBitFields {
@@ -716,6 +720,7 @@ class ObjCAttr final : public DeclAttribute,
   {
     ObjCAttrBits.HasTrailingLocationInfo = false;
     ObjCAttrBits.ImplicitName = implicitName;
+    ObjCAttrBits.Swift3Inferred = false;
 
     if (name) {
       NameData = name->getOpaqueValue();
@@ -821,6 +826,18 @@ public:
 
     NameData = name.getOpaqueValue();
     ObjCAttrBits.ImplicitName = implicit;
+  }
+
+  /// Determine whether this attribute was inferred based on Swift 3's
+  /// deprecated @objc inference rules.
+  bool isSwift3Inferred() const {
+    return ObjCAttrBits.Swift3Inferred;
+  }
+
+  /// Set whether this attribute was inferred based on Swift 3's deprecated
+  /// @objc inference rules.
+  void setSwift3Inferred(bool inferred = true) {
+    ObjCAttrBits.Swift3Inferred = inferred;
   }
 
   /// Clear the name of this entity.
@@ -1144,10 +1161,9 @@ public:
   }
 
   /// Determine whether there is a swiftVersionSpecific attribute that's
-  /// unavailable relative to the provided language version (defaulting to
-  /// current language version).
-  bool isUnavailableInSwiftVersion(const version::Version &effectiveVersion =
-           version::Version::getCurrentLanguageVersion()) const;
+  /// unavailable relative to the provided language version.
+  bool
+  isUnavailableInSwiftVersion(const version::Version &effectiveVersion) const;
 
   /// Returns the first @available attribute that indicates
   /// a declaration is unavailable, or null otherwise.
@@ -1249,7 +1265,7 @@ public:
 
   /// Return a range with all attributes in DeclAttributes with AttrKind
   /// ATTR.
-  template <typename ATTR, bool AllowInvalid>
+  template <typename ATTR, bool AllowInvalid = false>
   AttributeKindRange<ATTR, AllowInvalid> getAttributes() const {
     return AttributeKindRange<ATTR, AllowInvalid>(
         make_range(begin(), end()), ToAttributeKind<ATTR, AllowInvalid>());

@@ -1,5 +1,5 @@
-// RUN: %target-swift-frontend -Xllvm -new-mangling-for-tests -emit-silgen -parse-stdlib %s -disable-objc-attr-requires-foundation-module | %FileCheck %s
-// RUN: %target-swift-frontend -Xllvm -new-mangling-for-tests -emit-sil -Onone -parse-stdlib %s -disable-objc-attr-requires-foundation-module | %FileCheck -check-prefix=CANONICAL %s
+// RUN: %target-swift-frontend -emit-silgen -parse-stdlib %s -disable-objc-attr-requires-foundation-module | %FileCheck %s
+// RUN: %target-swift-frontend -emit-sil -Onone -parse-stdlib %s -disable-objc-attr-requires-foundation-module | %FileCheck -check-prefix=CANONICAL %s
 
 import Swift
 
@@ -251,7 +251,7 @@ func class_archetype_to_unknown_object<T : C>(_ t: T) -> Builtin.UnknownObject {
 // CHECK-NEXT:   destroy_value [[ARG]]
 // CHECK-NEXT:   return [[PTR]]
 func class_existential_to_native_object(_ t:ClassProto) -> Builtin.NativeObject {
-  return Builtin.castToNativeObject(t)
+  return Builtin.unsafeCastToNativeObject(t)
 }
 
 // CHECK-LABEL: sil hidden @_T08builtins35class_existential_to_unknown_object{{[_0-9a-zA-Z]*}}F

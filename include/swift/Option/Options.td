@@ -166,6 +166,10 @@ def import_objc_header : Separate<["-"], "import-objc-header">,
   Flags<[FrontendOption, HelpHidden]>,
   HelpText<"Implicitly imports an Objective-C header file">;
 
+def pch_output_dir: Separate<["-"], "pch-output-dir">,
+  Flags<[FrontendOption, HelpHidden]>,
+  HelpText<"Directory to persist automatically created precompiled bridging headers">;
+
 // FIXME: Unhide this once it doesn't depend on an output file map.
 def incremental : Flag<["-"], "incremental">,
   Flags<[NoInteractiveOption, HelpHidden, DoesNotAffectIncrementalBuild]>,
@@ -187,6 +191,9 @@ def save_temps : Flag<["-"], "save-temps">,
 def driver_time_compilation : Flag<["-"], "driver-time-compilation">,
   Flags<[NoInteractiveOption,DoesNotAffectIncrementalBuild]>,
   HelpText<"Prints the total time it took to execute all compilation tasks">;
+def stats_output_dir: Separate<["-"], "stats-output-dir">,
+  Flags<[FrontendOption, HelpHidden]>,
+  HelpText<"Directory to write unified compilation-statistics files to">;
 
 def emit_dependencies : Flag<["-"], "emit-dependencies">,
   Flags<[FrontendOption, NoInteractiveOption, DoesNotAffectIncrementalBuild]>,
@@ -263,6 +270,10 @@ def warnings_as_errors : Flag<["-"], "warnings-as-errors">,
 def continue_building_after_errors : Flag<["-"], "continue-building-after-errors">,
   Flags<[FrontendOption, DoesNotAffectIncrementalBuild]>,
   HelpText<"Continue building, even after errors are encountered">;
+
+def warn_swift3_objc_inference : Flag<["-"], "warn-swift3-objc-inference">,
+  Flags<[FrontendOption, DoesNotAffectIncrementalBuild]>,
+  HelpText<"Warn about deprecated @objc inference in Swift 3">;
 
 // Platform options.
 def enable_app_extension : Flag<["-"], "application-extension">,
@@ -348,6 +359,11 @@ def gdwarf_types : Flag<["-"], "gdwarf-types">,
   Group<g_Group>, Flags<[FrontendOption]>,
   HelpText<"Emit full DWARF type info.">;
 
+// Verify debug info
+def verify_debug_info : Flag<["-"], "verify-debug-info">,
+  Flags<[NoInteractiveOption, DoesNotAffectIncrementalBuild]>,
+  HelpText<"Verify the binary representation of debug output.">;
+
 // Assert configuration identifiers.
 def AssertConfig : Separate<["-"], "assert-config">,
   Flags<[FrontendOption]>,
@@ -430,6 +446,12 @@ def emit_sib : Flag<["-"], "emit-sib">,
   Flags<[FrontendOption, NoInteractiveOption, DoesNotAffectIncrementalBuild]>;
 def emit_sibgen : Flag<["-"], "emit-sibgen">,
   HelpText<"Emit serialized AST + raw SIL file(s)">, ModeOpt,
+  Flags<[FrontendOption, NoInteractiveOption, DoesNotAffectIncrementalBuild]>;
+def emit_imported_modules : Flag<["-"], "emit-imported-modules">,
+  HelpText<"Emit a list of the imported modules">, ModeOpt,
+  Flags<[FrontendOption, NoInteractiveOption, DoesNotAffectIncrementalBuild]>;
+def emit_tbd : Flag<["-"], "emit-tbd">,
+  HelpText<"Emit a TBD file">, ModeOpt,
   Flags<[FrontendOption, NoInteractiveOption, DoesNotAffectIncrementalBuild]>;
 
 def c : Flag<["-"], "c">, Alias<emit_object>,
@@ -557,5 +579,9 @@ def sanitize_coverage_EQ : CommaJoined<["-"], "sanitize-coverage=">,
   MetaVarName<"<type>">,
   HelpText<"Specify the type of coverage instrumentation for Sanitizers and"
   " additional options separated by commas">;
+
+def enforce_exclusivity_EQ : Joined<["-"], "enforce-exclusivity=">,
+  Flags<[FrontendOption]>, MetaVarName<"<enforcement>">,
+  HelpText<"Enforce law of exclusivity">;
 
 include "FrontendOptions.td"

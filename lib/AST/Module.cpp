@@ -16,10 +16,11 @@
 
 #include "swift/AST/Module.h"
 #include "swift/AST/AccessScope.h"
-#include "swift/AST/AST.h"
+#include "swift/AST/ASTContext.h"
 #include "swift/AST/ASTPrinter.h"
 #include "swift/AST/ASTScope.h"
 #include "swift/AST/ASTWalker.h"
+#include "swift/AST/Builtins.h"
 #include "swift/AST/DiagnosticsSema.h"
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/LazyResolver.h"
@@ -180,7 +181,7 @@ void SourceLookupCache::doPopulateCache(Range decls,
                                         bool onlyOperators) {
   for (Decl *D : decls) {
     if (ValueDecl *VD = dyn_cast<ValueDecl>(D))
-      if (onlyOperators ? VD->getName().isOperator() : VD->hasName()) {
+      if (onlyOperators ? VD->isOperator() : VD->hasName()) {
         // Cache the value under both its compound name and its full name.
         TopLevelValues.add(VD);
       }
@@ -605,7 +606,7 @@ ModuleDecl::lookupConformance(Type type, ProtocolDecl *protocol,
   // itself.
   if (type->isExistentialType()) {
     SmallVector<ProtocolDecl *, 4> protocols;
-    type->getAnyExistentialTypeProtocols(protocols);
+    type->getExistentialTypeProtocols(protocols);
 
     // Due to an IRGen limitation, witness tables cannot be passed from an
     // existential to an archetype parameter, so for now we restrict this to
@@ -1417,19 +1418,14 @@ SourceFile::getDiscriminatorForPrivateValue(const ValueDecl *D) const {
   llvm::MD5::MD5Result result;
   hash.final(result);
 
-  // Make sure the whole thing is a valid identifier.
+  // Use the hash as a hex string, prefixed with an underscore to make sure
+  // it is a valid identifier.
+  // FIXME: There are more compact ways to encode a 16-byte value.
   SmallString<33> buffer{"_"};
-
-  // Write the hash as a hex string.
-  // FIXME: This should go into llvm/ADT/StringExtras.h.
-  // FIXME: And there are more compact ways to encode a 16-byte value.
-  buffer.reserve(buffer.size() + 2*llvm::array_lengthof(result));
-  for (uint8_t byte : result) {
-    buffer.push_back(llvm::hexdigit(byte >> 4, /*LowerCase=*/false));
-    buffer.push_back(llvm::hexdigit(byte & 0xF, /*LowerCase=*/false));
-  }
-
-  PrivateDiscriminator = getASTContext().getIdentifier(buffer);
+  SmallString<32> hashString;
+  llvm::MD5::stringifyResult(result, hashString);
+  buffer += hashString;
+  PrivateDiscriminator = getASTContext().getIdentifier(buffer.str().upper());
   return PrivateDiscriminator;
 }
 

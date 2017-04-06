@@ -714,12 +714,13 @@ void swift::performTypeChecking(SourceFile &SF, TopLevelContext &TLC,
 
     typeCheckFunctionsAndExternalDecls(TC);
   }
-  MyTC.reset();
 
   // Checking that benefits from having the whole module available.
   if (!(Options & TypeCheckingFlags::DelayWholeModuleChecking)) {
     performWholeModuleTypeChecking(SF);
   }
+
+  MyTC.reset();
 
   // Verify that we've checked types correctly.
   SF.ASTStage = SourceFile::TypeChecked;
@@ -997,6 +998,8 @@ TypeChecker::getDeclTypeCheckingSemantics(ValueDecl *decl) {
       return DeclTypeCheckingSemantics::TypeOf;
     if (semantics->Value.equals("typechecker.withoutActuallyEscaping(_:do:)"))
       return DeclTypeCheckingSemantics::WithoutActuallyEscaping;
+    if (semantics->Value.equals("typechecker._openExistential(_:do:)"))
+      return DeclTypeCheckingSemantics::OpenExistential;
   }
   return DeclTypeCheckingSemantics::Normal;
 }

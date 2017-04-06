@@ -249,7 +249,7 @@ private:
     case Node::Kind::Metatype:
     case Node::Kind::MetatypeRepresentation:
     case Node::Kind::Module:
-    case Node::Kind::NonVariadicTuple:
+    case Node::Kind::Tuple:
     case Node::Kind::Protocol:
     case Node::Kind::QualifiedArchetype:
     case Node::Kind::ReturnType:
@@ -260,7 +260,6 @@ private:
     case Node::Kind::Type:
     case Node::Kind::TypeAlias:
     case Node::Kind::TypeList:
-    case Node::Kind::VariadicTuple:
       return true;
 
     case Node::Kind::ProtocolList:
@@ -378,6 +377,7 @@ private:
     case Node::Kind::ValueWitnessTable:
     case Node::Kind::Variable:
     case Node::Kind::VTableAttribute:
+    case Node::Kind::VTableThunk:
     case Node::Kind::Weak:
     case Node::Kind::WillSet:
     case Node::Kind::WitnessTableOffset:
@@ -943,8 +943,7 @@ void NodePrinter::print(NodePointer pointer, bool asContext, bool suppressType) 
         if (child0_kind == Node::Kind::Type)
           child0_kind = pointer->getChild(0)->getChild(0)->getKind();
 
-        if (child0_kind != Node::Kind::VariadicTuple &&
-            child0_kind != Node::Kind::NonVariadicTuple)
+        if (child0_kind != Node::Kind::Tuple)
           need_parens = true;
       }
     }
@@ -955,26 +954,39 @@ void NodePrinter::print(NodePointer pointer, bool asContext, bool suppressType) 
       Printer << ")";
     return;
   }
-  case Node::Kind::NonVariadicTuple:
-  case Node::Kind::VariadicTuple: {
+  case Node::Kind::Tuple: {
     Printer << "(";
     printChildren(pointer, ", ");
-    if (pointer->getKind() == Node::Kind::VariadicTuple)
-      Printer << "...";
     Printer << ")";
     return;
   }
-  case Node::Kind::TupleElement:
-    if (pointer->getNumChildren() == 1) {
-      NodePointer type = pointer->getChild(0);
-      print(type);
-    } else if (pointer->getNumChildren() == 2) {
-      NodePointer id = pointer->getChild(0);
-      NodePointer type = pointer->getChild(1);
+  case Node::Kind::TupleElement: {
+    unsigned Idx = 0;
+    bool isVariadic = false;
+    if (pointer->getNumChildren() >= 1 &&
+        pointer->getFirstChild()->getKind() == Node::Kind::VariadicMarker) {
+      isVariadic = true;
+      Idx++;
+    }
+    NodePointer type = nullptr;
+    if (pointer->getNumChildren() == Idx + 1) {
+      type = pointer->getChild(Idx);
+    } else if (pointer->getNumChildren() == Idx + 2) {
+      NodePointer id = pointer->getChild(Idx);
+      type = pointer->getChild(Idx + 1);
       print(id);
+    }
+    if (isVariadic) {
+      SugarType Sugar = findSugar(type);
+      if (Sugar == SugarType::Array)
+        type = type->getFirstChild()->getChild(1)->getFirstChild();
+      print(type);
+      Printer << "...";
+    } else {
       print(type);
     }
     return;
+  }
   case Node::Kind::TupleElementName:
     Printer << pointer->getText() << " : ";
     return;
@@ -1172,6 +1184,13 @@ void NodePrinter::print(NodePointer pointer, bool asContext, bool suppressType) 
     Printer << "instantiation function for generic protocol witness table for ";
     print(pointer->getFirstChild());
     return;
+  case Node::Kind::VTableThunk: {
+    Printer << "vtable thunk for ";
+    print(pointer->getChild(1));
+    Printer << " dispatching to ";
+    print(pointer->getChild(0));
+    return;
+  }
   case Node::Kind::ProtocolWitness: {
     Printer << "protocol witness for ";
     print(pointer->getChild(1));
@@ -1561,6 +1580,10 @@ void NodePrinter::print(NodePointer pointer, bool asContext, bool suppressType) 
       name = "_RefCountedObject";
     } else if (c == 'N') {
       name = "_NativeRefCountedObject";
+    } else if (c == 'C') {
+      name = "_Class";
+    } else if (c == 'D') {
+      name = "_NativeClass";
     } else if (c == 'T') {
       name = "_Trivial";
     } else if (c == 'E' || c == 'e') {

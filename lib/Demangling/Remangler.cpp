@@ -30,7 +30,7 @@
 
 using namespace swift;
 using namespace Demangle;
-using namespace NewMangling;
+using namespace Mangle;
 
 [[noreturn]]
 static void unreachable(const char *Message) {
@@ -131,8 +131,8 @@ bool SubstitutionEntry::deepEquals(Node *lhs, Node *rhs) const {
 
 class Remangler {
   template <typename Mangler>
-  friend void NewMangling::mangleIdentifier(Mangler &M, StringRef ident);
-  friend class NewMangling::SubstitutionMerging;
+  friend void Mangle::mangleIdentifier(Mangler &M, StringRef ident);
+  friend class Mangle::SubstitutionMerging;
 
   const bool UsePunycode = true;
 
@@ -162,10 +162,6 @@ class Remangler {
   class EntityContext {
     bool AsContext = false;
   public:
-    bool isAsContext() const {
-      return AsContext;
-    }
-
     class ManglingContextRAII {
       EntityContext &Ctx;
       bool SavedValue;
@@ -339,10 +335,10 @@ void Remangler::mangleIdentifierImpl(Node *node, bool isOperator) {
   SubstitutionEntry entry;
   if (trySubstitution(node, entry, /*treatAsIdentifier*/ true)) return;
   if (isOperator) {
-    NewMangling::mangleIdentifier(*this,
-                              NewMangling::translateOperator(node->getText()));
+    Mangle::mangleIdentifier(*this,
+                              Mangle::translateOperator(node->getText()));
   } else {
-    NewMangling::mangleIdentifier(*this, node->getText());
+    Mangle::mangleIdentifier(*this, node->getText());
   }
   addSubstitution(entry);
 }
@@ -449,13 +445,11 @@ void Remangler::mangleGenericArgs(Node *node, char &Separator) {
   switch (node->getKind()) {
     case Node::Kind::Structure:
     case Node::Kind::Enum:
-    case Node::Kind::Class: {
-      NodePointer parentOrModule = node->getChild(0);
-      mangleGenericArgs(parentOrModule, Separator);
+    case Node::Kind::Class:
+      mangleGenericArgs(node->getChild(0), Separator);
       Buffer << Separator;
       Separator = '_';
       break;
-    }
 
     case Node::Kind::BoundGenericStructure:
     case Node::Kind::BoundGenericEnum:
@@ -471,6 +465,10 @@ void Remangler::mangleGenericArgs(Node *node, char &Separator) {
       break;
     }
       
+    case Node::Kind::Extension:
+      mangleGenericArgs(node->getChild(1), Separator);
+      break;
+
     default:
       break;
   }
@@ -483,7 +481,7 @@ void Remangler::mangleAllocator(Node *node) {
 
 void Remangler::mangleArgumentTuple(Node *node) {
   Node *Child = skipType(getSingleChild(node));
-  if (Child->getKind() == Node::Kind::NonVariadicTuple &&
+  if (Child->getKind() == Node::Kind::Tuple &&
       Child->getNumChildren() == 0) {
     Buffer << 'y';
     return;
@@ -1325,7 +1323,7 @@ void Remangler::mangleNonObjCAttribute(Node *node) {
   Buffer << "TO";
 }
 
-void Remangler::mangleNonVariadicTuple(Node *node) {
+void Remangler::mangleTuple(Node *node) {
   mangleTypeList(node);
   Buffer << 't';
 }
@@ -1597,12 +1595,12 @@ void Remangler::mangleVariable(Node *node) {
   Buffer << 'v';
 }
 
-void Remangler::mangleVariadicTuple(Node *node) {
-  mangleTypeList(node);
-  Buffer << "dt";
+void Remangler::mangleVTableAttribute(Node *node) {
+  unreachable("Old-fashioned vtable thunk in new mangling format");
 }
 
-void Remangler::mangleVTableAttribute(Node *node) {
+void Remangler::mangleVTableThunk(Node *node) {
+  mangleChildNodes(node);
   Buffer << "TV";
 }
 
@@ -1741,13 +1739,11 @@ bool Demangle::isSpecialized(Node *node) {
 
     case Node::Kind::Structure:
     case Node::Kind::Enum:
-    case Node::Kind::Class: {
-      Node *parentOrModule = node->getChild(0);
-      if (isSpecialized(parentOrModule))
-        return true;
+    case Node::Kind::Class:
+      return isSpecialized(node->getChild(0));
 
-      return false;
-    }
+    case Node::Kind::Extension:
+      return isSpecialized(node->getChild(1));
 
     default:
       return false;
@@ -1781,6 +1777,15 @@ NodePointer Demangle::getUnspecialized(Node *node, NodeFactory &Factory) {
         return nominalType;
     }
       
+    case Node::Kind::Extension: {
+      NodePointer parent = node->getChild(1);
+      if (!isSpecialized(parent))
+        return node;
+      NodePointer result = Factory.createNode(Node::Kind::Extension);
+      result->addChild(node->getFirstChild(), Factory);
+      result->addChild(getUnspecialized(parent, Factory), Factory);
+      return result;
+    }
     default:
       unreachable("bad nominal type kind");
   }

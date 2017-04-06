@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -Xllvm -new-mangling-for-tests -emit-silgen %s | %FileCheck %s
+// RUN: %target-swift-frontend -emit-silgen %s | %FileCheck %s
 
 struct MyMetatypeIsThin {}
 
@@ -31,8 +31,8 @@ func reabstractFunctionInOut() {
   consumeGenericInOut(&minimallyAbstracted)
 }
 
-// CHECK-LABEL: sil shared [transparent] [reabstraction_thunk] @_T0SiSdIxyd_SiSdIxir_TR : $@convention(thin) (@in Int, @owned @callee_owned (Int) -> Double) -> @out Double
-// CHECK-LABEL: sil shared [transparent] [reabstraction_thunk] @_T0SiSdIxir_SiSdIxyd_TR : $@convention(thin) (Int, @owned @callee_owned (@in Int) -> @out Double) -> Double
+// CHECK-LABEL: sil shared [transparent] [serializable] [reabstraction_thunk] @_T0SiSdIxyd_SiSdIxir_TR : $@convention(thin) (@in Int, @owned @callee_owned (Int) -> Double) -> @out Double
+// CHECK-LABEL: sil shared [transparent] [serializable] [reabstraction_thunk] @_T0SiSdIxir_SiSdIxyd_TR : $@convention(thin) (Int, @owned @callee_owned (@in Int) -> @out Double) -> Double
 
 // CHECK-LABEL: sil hidden @_T017reabstract_lvalue0A13MetatypeInOutyyF : $@convention(thin) () -> ()
 func reabstractMetatypeInOut() {

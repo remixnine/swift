@@ -63,11 +63,11 @@ static void getAllSubclasses(ClassHierarchyAnalysis *CHA,
   //SmallVector<ClassDecl *, 8> Subs(DirectSubs);
   Subs.append(IndirectSubs.begin(), IndirectSubs.end());
 
-  if (isa<BoundGenericClassType>(ClassType.getSwiftRValueType())) {
+  if (ClassType.is<BoundGenericClassType>()) {
     // Filter out any subclasses that do not inherit from this
     // specific bound class.
     auto RemovedIt = std::remove_if(Subs.begin(), Subs.end(),
-        [&ClassType, &M](ClassDecl *Sub){
+        [&ClassType](ClassDecl *Sub){
           auto SubCanTy = Sub->getDeclaredType()->getCanonicalType();
           // Unbound generic type can override a method from
           // a bound generic class, but this unbound generic
@@ -343,7 +343,7 @@ SILType swift::getExactDynamicType(SILValue S, SILModule &M,
 
     if (auto *FArg = dyn_cast<SILFunctionArgument>(Arg)) {
       // Bail on metatypes for now.
-      if (FArg->getType().getSwiftRValueType()->is<AnyMetatypeType>()) {
+      if (FArg->getType().is<AnyMetatypeType>()) {
         return SILType();
       }
       auto *CD = FArg->getType().getClassOrBoundGenericClass();
@@ -536,7 +536,7 @@ bool swift::canDevirtualizeClassMethod(FullApplySite AI,
     return false;
   }
 
-  if (AI.getFunction()->isFragile()) {
+  if (AI.getFunction()->isSerialized()) {
     // function_ref inside fragile function cannot reference a private or
     // hidden symbol.
     if (!F->hasValidLinkageForFragileRef())
@@ -922,7 +922,7 @@ static bool canDevirtualizeWitnessMethod(ApplySite AI) {
   if (!F)
     return false;
 
-  if (AI.getFunction()->isFragile()) {
+  if (AI.getFunction()->isSerialized()) {
     // function_ref inside fragile function cannot reference a private or
     // hidden symbol.
     if (!F->hasValidLinkageForFragileRef())

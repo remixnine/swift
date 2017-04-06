@@ -450,7 +450,10 @@ public:
 
   /// Retrieve the declaration of Swift.==(Int, Int) -> Bool.
   FuncDecl *getEqualIntDecl() const;
-  
+
+  /// Retrieve the declaration of Array.append(element:)
+  FuncDecl *getArrayAppendElementDecl() const;
+
   /// Retrieve the declaration of Swift._unimplementedInitializer.
   FuncDecl *getUnimplementedInitializerDecl(LazyResolver *resolver) const;
 
@@ -681,6 +684,15 @@ public:
   /// given normal protocol conformance.
   std::vector<DelayedConformanceDiag>
   takeDelayedConformanceDiags(NormalProtocolConformance *conformance);
+
+  /// Add delayed missing witnesses for the given normal protocol conformance.
+  void addDelayedMissingWitnesses(NormalProtocolConformance *conformance,
+                                  ArrayRef<ValueDecl*> witnesses);
+
+  /// Retrieve the delayed missing witnesses for the given normal protocol
+  /// conformance.
+  std::vector<ValueDecl*>
+  takeDelayedMissingWitnesses(NormalProtocolConformance *conformance);
 
   /// \brief Produce a specialized conformance, which takes a generic
   /// conformance and substitutions written in terms of the generic

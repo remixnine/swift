@@ -189,8 +189,7 @@ static std::tuple<char, ObjCSelector, CanType>
 getDynamicResultSignature(ValueDecl *decl) {
   if (auto func = dyn_cast<AbstractFunctionDecl>(decl)) {
     // Handle functions.
-    auto type =
-      decl->getInterfaceType()->castTo<AnyFunctionType>()->getResult();
+    auto type = func->getMethodInterfaceType();
     return std::make_tuple(func->isStatic(), func->getObjCSelector(),
                            type->getCanonicalType());
   }
@@ -1338,15 +1337,46 @@ resolveOverloadForDeclWithSpecialTypeCheckingSemantics(ConstraintSystem &CS,
       CS.getConstraintLocator(locator, ConstraintLocator::FunctionResult), 0);
     auto bodyClosure = FunctionType::get(
       ParenType::get(CS.getASTContext(), escapeClosure), result,
-      FunctionType::ExtInfo(FunctionType::Representation::Swift,
-                            /*autoclosure*/ false,
-                            /*noescape*/ true,
-                            /*throws*/ true));
+        FunctionType::ExtInfo(FunctionType::Representation::Swift,
+                              /*autoclosure*/ false,
+                              /*noescape*/ true,
+                              /*throws*/ true));
     TupleTypeElt argTupleElts[] = {
       TupleTypeElt(noescapeClosure),
       TupleTypeElt(bodyClosure, CS.getASTContext().getIdentifier("do")),
     };
     
+    auto argTuple = TupleType::get(argTupleElts, CS.getASTContext());
+    refType = FunctionType::get(argTuple, result,
+      FunctionType::ExtInfo(FunctionType::Representation::Swift,
+                            /*autoclosure*/ false,
+                            /*noescape*/ false,
+                            /*throws*/ true));
+    openedFullType = refType;
+    return true;
+  }
+  case DeclTypeCheckingSemantics::OpenExistential: {
+    // The body closure receives a freshly-opened archetype constrained by the
+    // existential type as its input.
+    auto openedTy = CS.createTypeVariable(
+      CS.getConstraintLocator(locator, ConstraintLocator::FunctionArgument), 0);
+    auto existentialTy = CS.createTypeVariable(
+      CS.getConstraintLocator(locator, ConstraintLocator::FunctionArgument), 0);
+    CS.addConstraint(ConstraintKind::OpenedExistentialOf,
+         openedTy, existentialTy,
+         CS.getConstraintLocator(locator, ConstraintLocator::RvalueAdjustment));
+    auto result = CS.createTypeVariable(
+      CS.getConstraintLocator(locator, ConstraintLocator::FunctionResult), 0);
+    auto bodyClosure = FunctionType::get(
+      ParenType::get(CS.getASTContext(), openedTy), result,
+        FunctionType::ExtInfo(FunctionType::Representation::Swift,
+                              /*autoclosure*/ false,
+                              /*noescape*/ true,
+                              /*throws*/ true));
+    TupleTypeElt argTupleElts[] = {
+      TupleTypeElt(existentialTy),
+      TupleTypeElt(bodyClosure, CS.getASTContext().getIdentifier("do")),
+    };
     auto argTuple = TupleType::get(argTupleElts, CS.getASTContext());
     refType = FunctionType::get(argTuple, result,
       FunctionType::ExtInfo(FunctionType::Representation::Swift,

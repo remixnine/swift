@@ -979,7 +979,7 @@ class RequirementRepr {
     : SeparatorLoc(SeparatorLoc), Kind(Kind), Invalid(false),
       FirstType(FirstType), SecondLayout(SecondLayout) { }
 
-  void printImpl(raw_ostream &OS, bool AsWritten) const;
+  void printImpl(ASTPrinter &OS, bool AsWritten) const;
 
 public:
   /// \brief Construct a new type-constraint requirement.
@@ -1164,6 +1164,7 @@ public:
       void dump() const LLVM_ATTRIBUTE_USED,
       "only for use within the debugger");
   void print(raw_ostream &OS) const;
+  void print(ASTPrinter &Printer) const;
 };
   
 /// GenericParamList - A list of generic parameters that is part of a generic
@@ -2970,7 +2971,51 @@ public:
   ElementRange getAllElements() const {
     return ElementRange(getMembers());
   }
-  
+
+  unsigned getNumElements() const {
+    auto eltRange = getAllElements();
+    return std::distance(eltRange.begin(), eltRange.end());
+  }
+
+  /// If this is an enum with two cases, return the other case. Otherwise,
+  /// return nullptr.
+  EnumElementDecl *getOppositeBinaryDecl(EnumElementDecl *decl) const {
+    ElementRange range = getAllElements();
+    auto iter = range.begin();
+    if (iter == range.end())
+      return nullptr;
+    bool seenDecl = false;
+    EnumElementDecl *result = nullptr;
+    if (*iter == decl) {
+      seenDecl = true;
+    } else {
+      result = *iter;
+    }
+
+    ++iter;
+    if (iter == range.end())
+      return nullptr;
+    if (seenDecl) {
+      assert(!result);
+      result = *iter;
+    } else {
+      if (decl != *iter)
+        return nullptr;
+      seenDecl = true;
+    }
+    ++iter;
+
+    // If we reach this point, we saw the decl we were looking for and one other
+    // case. If we have any additional cases, then we do not have a binary enum.
+    if (iter != range.end())
+      return nullptr;
+
+    // This is always true since we have already returned earlier nullptr if we
+    // did not see the decl at all.
+    assert(seenDecl);
+    return result;
+  }
+
   /// Return a range that iterates over all the cases of an enum.
   CaseRange getAllCases() const {
     return CaseRange(getMembers());
@@ -3367,6 +3412,13 @@ private:
 class ProtocolDecl : public NominalTypeDecl {
   SourceLoc ProtocolLoc;
 
+  /// The location of the 'class' keyword for class-bound protocols.
+  SourceLoc ClassRequirementLoc;
+
+  /// The syntactic representation of the where clause in a protocol like
+  /// `protocol ... where ... { ... }`.
+  TrailingWhereClause *TrailingWhere;
+
   llvm::DenseMap<ValueDecl *, Witness> DefaultWitnesses;
 
   /// The generic signature representing exactly the new requirements introduced
@@ -3389,8 +3441,9 @@ class ProtocolDecl : public NominalTypeDecl {
 
 public:
   ProtocolDecl(DeclContext *DC, SourceLoc ProtocolLoc, SourceLoc NameLoc,
-               Identifier Name, MutableArrayRef<TypeLoc> Inherited);
-  
+               Identifier Name, MutableArrayRef<TypeLoc> Inherited,
+               TrailingWhereClause *TrailingWhere);
+
   using Decl::getASTContext;
 
   /// Retrieve the set of protocols inherited from this protocol.
@@ -3437,6 +3490,17 @@ public:
     ProtocolDeclBits.RequiresClassValid = true;
     ProtocolDeclBits.RequiresClass = requiresClass;
   }
+
+  /// Specify that this protocol is class-bounded, recording the location of
+  /// the 'class' keyword.
+  void setClassBounded(SourceLoc loc) {
+    ClassRequirementLoc = loc;
+    ProtocolDeclBits.RequiresClassValid = true;
+    ProtocolDeclBits.RequiresClass = true;
+  }
+
+  /// Retrieve the source location of the 'class' keyword.
+  SourceLoc getClassBoundedLoc() const { return ClassRequirementLoc; }
 
   /// Determine whether an existential conforming to this protocol can be
   /// matched with a generic type parameter constrained to this protocol.
@@ -3552,6 +3616,11 @@ public:
   /// Create the generic parameters of this protocol if the haven't been
   /// created yet.
   void createGenericParamsIfMissing();
+
+  /// Retrieve the trailing where clause on this protocol, if it exists.
+  TrailingWhereClause *getTrailingWhereClause() const {
+    return TrailingWhere;
+  }
 
   /// Retrieve the generic signature representing the requirements introduced by
   /// this protocol.
@@ -4905,7 +4974,10 @@ public:
   
   /// True if the declaration is forced to be statically dispatched.
   bool hasForcedStaticDispatch() const;
-  
+
+  /// Get the interface type of this decl and remove the Self context.
+  Type getMethodInterfaceType() const;
+
   using DeclContext::operator new;
   using Decl::getASTContext;
 };
@@ -5160,7 +5232,7 @@ public:
     // A function cannot be an override if it is also a derived global decl
     // (since derived decls are at global scope).
     assert((!OverriddenOrBehaviorParamDecl
-            || !OverriddenOrBehaviorParamDecl.is<FuncDecl*>())
+            || OverriddenOrBehaviorParamDecl.get<FuncDecl*>() == over)
          && "function can only be one of override, derived, or behavior param");
     OverriddenOrBehaviorParamDecl = over;
     over->setIsOverridden();
@@ -5176,8 +5248,7 @@ public:
   void setParamBehavior(BehaviorRecord *behavior) {
     // Behavior param blocks cannot be overrides or derived.
     assert((!OverriddenOrBehaviorParamDecl
-            || !OverriddenOrBehaviorParamDecl
-                  .is<BehaviorRecord *>())
+            || OverriddenOrBehaviorParamDecl.is<BehaviorRecord *>())
          && "function can only be one of override, derived, or behavior param");
     OverriddenOrBehaviorParamDecl = behavior;
   }

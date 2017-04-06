@@ -49,6 +49,7 @@ class G<T> {
   // CHECK: @_specialize(exported: false, kind: full, where T == Int)
   @_specialize(where T == Int)
   @_specialize(where T == T) // expected-error{{Only concrete type same-type requirements are supported by '_specialize' attribute}}
+	// expected-warning@-1{{redundant same-type constraint 'T' == 'T'}}
   @_specialize(where T == S<T>) // expected-error{{Only concrete type same-type requirements are supported by '_specialize' attribute}}
 	// expected-error@-1{{same-type constraint 'T' == 'S<T>' is recursive}}
   @_specialize(where T == Int, U == Int) // expected-error{{use of undeclared type 'U'}}
@@ -157,12 +158,35 @@ public func anotherFuncWithTwoGenericParameters<X: P, Y>(x: X, y: Y) {
 func funcWithForbiddenSpecializeRequirement<T>(_ t: T) {
 }
 
-@_specialize(where T: _Trivial(32), T: _Trivial(64), T: _Trivial, T: _RefCountedObject) // expected-error{{multiple layout constraints cannot be used at the same time: '_Trivial(64)' and '_Trivial(32)'}} expected-note{{previous layout constraint declaration '_Trivial(32)' was here}} expected-error{{multiple layout constraints cannot be used at the same time: '_Trivial' and '_Trivial(32)'}} expected-note{{previous layout constraint declaration '_Trivial(32)' was here}} expected-error{{multiple layout constraints cannot be used at the same time: '_RefCountedObject' and '_Trivial(32)'}} expected-note{{previous layout constraint declaration '_Trivial(32)' was here}}
+@_specialize(where T: _Trivial(32), T: _Trivial(64), T: _Trivial, T: _RefCountedObject)
+// expected-error@-1{{generic parameter 'T' has conflicting layout constraints '_Trivial(64)' and '_Trivial(32)'}}
+// expected-error@-2{{generic parameter 'T' has conflicting layout constraints '_RefCountedObject' and '_Trivial(32)'}}
+// expected-warning@-3{{redundant layout constraint 'T' : '_Trivial'}}
+// expected-note@-4 3{{layout constraint constraint 'T' : '_Trivial(32)' written here}}
+@_specialize(where T: _Trivial, T: _Trivial(64))
+// expected-warning@-1{{redundant layout constraint 'T' : '_Trivial'}}
+// expected-note@-2 1{{layout constraint constraint 'T' : '_Trivial(64)' written here}}
+@_specialize(where T: _RefCountedObject, T: _NativeRefCountedObject)
+// expected-warning@-1{{redundant layout constraint 'T' : '_RefCountedObject'}}
+// expected-note@-2 1{{layout constraint constraint 'T' : '_NativeRefCountedObject' written here}}
 @_specialize(where Array<T> == Int) // expected-error{{Only requirements on generic parameters are supported by '_specialize' attribute}}
 // expected-error@-1{{generic signature requires types 'Array<T>' and 'Int' to be the same}}
 @_specialize(where T.Element == Int) // expected-error{{Only requirements on generic parameters are supported by '_specialize' attribute}}
 public func funcWithComplexSpecializeRequirements<T: ProtocolWithDep>(t: T) -> Int {
   return 55555
+}
+
+public protocol Proto: class {
+}
+
+@_specialize(where T: _RefCountedObject)
+// expected-warning@-1{{redundant layout constraint 'T' : '_RefCountedObject'}}
+@_specialize(where T: _Trivial)
+// expected-error@-1{{generic parameter 'T' has conflicting layout constraints '_Trivial' and '_NativeClass'}}
+@_specialize(where T: _Trivial(64))
+// expected-error@-1{{generic parameter 'T' has conflicting layout constraints '_Trivial(64)' and '_NativeClass'}}
+public func funcWithABaseClassRequirement<T>(t: T) -> Int where T: C1 {
+  return 44444
 }
 
 public struct S1 {
@@ -187,6 +211,9 @@ public func copyValue<S>(_ t: S, s: inout S) -> Int64 where S: P{
 @_specialize(exported: true, where S: _Trivial(64))
 @_specialize(exported: true, where S: _Trivial(32))
 @_specialize(exported: true, where S: _RefCountedObject)
+@_specialize(exported: true, where S: _NativeRefCountedObject)
+@_specialize(exported: true, where S: _Class)
+@_specialize(exported: true, where S: _NativeClass)
 @inline(never)
 public func copyValueAndReturn<S>(_ t: S, s: inout S) -> S where S: P{
   return s

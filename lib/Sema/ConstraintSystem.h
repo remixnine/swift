@@ -33,6 +33,7 @@
 #include "swift/AST/TypeCheckerDebugConsumer.h"
 #include "llvm/ADT/ilist.h"
 #include "llvm/ADT/PointerUnion.h"
+#include "llvm/ADT/SetVector.h"
 #include "llvm/ADT/SmallPtrSet.h"
 #include "llvm/Support/ErrorHandling.h"
 #include "llvm/Support/raw_ostream.h"
@@ -1161,8 +1162,10 @@ private:
         : RootExpr(expr), CS(cs), ExcludeRoot(excludeRoot) {}
 
     Expr *walkToExprPost(Expr *expr) override {
-      if (ExcludeRoot && expr == RootExpr)
+      if (ExcludeRoot && expr == RootExpr) {
+        assert(!expr->getType() && "Unexpected type in root of expression!");
         return expr;
+      }
 
       if (expr->getType())
         CS.cacheType(expr);
@@ -1428,14 +1431,12 @@ public:
   void setType(Expr *E, Type T) {
     assert(T && "Expected non-null type!");
 
-    // FIXME: Ideally this would be enabled but there are currently at
-    // least a few places where we set types to different values. We
-    // should track down and fix those places.
-
+    // FIXME: We sometimes set the type and then later set it to a
+    //        value that is slightly different, e.g. not an lvalue.
     // assert((ExprTypes.find(E) == ExprTypes.end() ||
     //         ExprTypes.find(E)->second->isEqual(T) ||
     //         ExprTypes.find(E)->second->hasTypeVariable()) &&
-    //        "Expected type to be set exactly once!");
+    //        "Expected type to be invariant!");
 
     ExprTypes[E] = T.getPointer();
 
@@ -1452,9 +1453,10 @@ public:
   /// Get the type for an expression.
   Type getType(const Expr *E) const {
     assert(hasType(E) && "Expected type to have been set!");
-    assert((!E->getType() ||
-            E->getType()->isEqual(ExprTypes.find(E)->second)) &&
-           "Mismatched types!");
+    // FIXME: lvalue differences
+    //    assert((!E->getType() ||
+    //            E->getType()->isEqual(ExprTypes.find(E)->second)) &&
+    //           "Mismatched types!");
     return ExprTypes.find(E)->second;
   }
 
@@ -2053,7 +2055,10 @@ public:
 
   /// \brief Propagate constraints in an effort to enforce local
   /// consistency to reduce the time to solve the system.
-  void propagateConstraints();
+  ///
+  /// \returns true if the system is known to be inconsistent (have no
+  /// solutions).
+  bool propagateConstraints();
 
   /// \brief The result of attempting to resolve a constraint or set of
   /// constraints.
@@ -2272,6 +2277,12 @@ private:
                                          TypeMatchOptions flags,
                                          ConstraintLocatorBuilder locator);
 
+  /// \brief Attempt to simplify the given OpenedExistentialOf constraint.
+  SolutionKind simplifyOpenedExistentialOfConstraint(
+                                         Type type1, Type type2,
+                                         TypeMatchOptions flags,
+                                         ConstraintLocatorBuilder locator);
+
   /// \brief Attempt to simplify the given defaultable constraint.
   SolutionKind simplifyDefaultableConstraint(Type first, Type second,
                                              TypeMatchOptions flags,
@@ -2349,6 +2360,16 @@ private:
   ///
   /// \param expr The expression to find reductions for.
   void shrink(Expr *expr);
+
+  bool simplifyForConstraintPropagation(Constraint *applicableFn,
+                 llvm::SmallVectorImpl<Constraint *> &workList);
+  bool isBindOverloadConsistent(Constraint *bindConstraint,
+                                Constraint *applicableFn,
+                         llvm::SmallVectorImpl<Constraint *> &otherApplicableFn,
+                                int depth);
+  bool isApplicableFunctionConsistent(Constraint *applicableFn,
+                                      llvm::SetVector<Constraint *> &workList,
+                                      int depth);
 
  public:
 

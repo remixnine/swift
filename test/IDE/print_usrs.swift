@@ -1,5 +1,5 @@
 // RUN: %target-swift-frontend(mock-sdk: %clang-importer-sdk) -typecheck -verify -disable-objc-attr-requires-foundation-module %s
-// RUN: %target-swift-ide-test(mock-sdk: %clang-importer-sdk) -new-mangling-for-tests -print-usrs -source-filename %s | %FileCheck %s -strict-whitespace
+// RUN: %target-swift-ide-test(mock-sdk: %clang-importer-sdk) -print-usrs -source-filename %s | %FileCheck %s -strict-whitespace
 
 import macros
 
@@ -25,6 +25,13 @@ class MyCls {
     // CHECK: [[@LINE+1]]:5 s:14swift_ide_test5MyClsC9subscriptSfSicfg{{$}}
     get { return 0.0 }
     // CHECK: [[@LINE+1]]:5 s:14swift_ide_test5MyClsC9subscriptSfSicfs{{$}}
+    set {}
+  }
+  // CHECK: [[@LINE+1]]:3 s:14swift_ide_test5MyClsC9subscriptSfSi_Sitci{{$}}
+  subscript(_: Int, _: Int) -> Float {
+    // CHECK: [[@LINE+1]]:5 s:14swift_ide_test5MyClsC9subscriptSfSi_Sitcfg{{$}}
+    get { return 0.0 }
+    // CHECK: [[@LINE+1]]:5 s:14swift_ide_test5MyClsC9subscriptSfSi_Sitcfs{{$}}
     set {}
   }
 }

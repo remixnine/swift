@@ -294,6 +294,18 @@ public:
   bool isClassExistentialType() const {
     return getSwiftRValueType()->isClassExistentialType();
   }
+
+  /// Returns true if the referenced type is an opened existential type
+  /// (which is actually a kind of archetype).
+  bool isOpenedExistential() const {
+    return getSwiftRValueType()->isOpenedExistential();
+  }
+
+  /// Returns true if the referenced type is expressed in terms of one
+  /// or more opened existential types.
+  bool hasOpenedExistential() const {
+    return getSwiftRValueType()->hasOpenedExistential();
+  }
   
   /// Returns the representation used by an existential type. If the concrete
   /// type is provided, this may return a specialized representation kind that
@@ -480,6 +492,11 @@ public:
   /// Returns the underlying referent SILType of an @sil_unowned or @sil_weak
   /// Type.
   SILType getReferentType(SILModule &M) const;
+
+  /// Given two SIL types which are representations of the same type,
+  /// check whether they have an abstraction difference.
+  bool hasAbstractionDifference(SILFunctionTypeRepresentation rep,
+                                SILType type2);
 
   /// Returns the hash code for the SILType.
   llvm::hash_code getHashCode() const {

@@ -16,13 +16,17 @@
 
 #include "swift/Subsystems.h"
 #include "swift/AST/AccessScope.h"
-#include "swift/AST/AST.h"
 #include "swift/AST/ASTContext.h"
 #include "swift/AST/ASTWalker.h"
+#include "swift/AST/Decl.h"
+#include "swift/AST/Expr.h"
+#include "swift/AST/Module.h"
+#include "swift/AST/ParameterList.h"
+#include "swift/AST/Pattern.h"
+#include "swift/AST/Stmt.h"
 #include "swift/AST/ForeignErrorConvention.h"
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/Initializer.h"
-#include "swift/AST/Mangle.h"
 #include "swift/AST/PrettyStackTrace.h"
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/Basic/SourceManager.h"
@@ -652,9 +656,6 @@ struct ASTNodeBase {};
     }
 
     void verifyCheckedAlways(ValueDecl *D) {
-      if (D->hasName())
-        checkMangling(D);
-
       if (D->hasInterfaceType())
         verifyChecked(D->getInterfaceType());
 
@@ -700,7 +701,6 @@ struct ASTNodeBase {};
     }
 
     void verifyCheckedAlways(NominalTypeDecl *D) {
-      checkMangling(D);
       verifyCheckedAlwaysBase(D);
     }
 
@@ -1045,9 +1045,17 @@ struct ASTNodeBase {};
         abort();
       }
 
-      SmallVector<ProtocolDecl*, 2> protocols;
-      if (!srcTy->isExistentialType(protocols)
-          || protocols.size() != 1
+      if (!srcTy->isExistentialType()) {
+        Out << "ProtocolMetatypeToObject with non-existential metatype:\n";
+        E->print(Out);
+        Out << "\n";
+        abort();
+      }
+
+      SmallVector<ProtocolDecl*, 1> protocols;
+      srcTy->getExistentialTypeProtocols(protocols);
+
+      if (protocols.size() != 1
           || !protocols[0]->isObjC()) {
         Out << "ProtocolMetatypeToObject with non-ObjC-protocol metatype:\n";
         E->print(Out);
@@ -1618,7 +1626,7 @@ struct ASTNodeBase {};
     }
 
     void verifyChecked(TypeExpr *expr) {
-      if (!expr->getType()->getAs<AnyMetatypeType>()) {
+      if (!expr->getType()->is<AnyMetatypeType>()) {
         Out << "TypeExpr must have metatype type\n";
         abort();
       }
@@ -1757,6 +1765,36 @@ struct ASTNodeBase {};
           abort();
         }
       }
+
+      // Make sure we consistently set accessor overrides.
+      if (auto *baseASD = ASD->getOverriddenDecl()) {
+        if (ASD->getGetter() && baseASD->getGetter())
+          assert(ASD->getGetter()->getOverriddenDecl() ==
+                 baseASD->getGetter() &&
+                 "Storage overrides but getter does not");
+        if (ASD->getSetter() && baseASD->getSetter() &&
+            baseASD->isSetterAccessibleFrom(ASD->getDeclContext()))
+          assert(ASD->getSetter()->getOverriddenDecl() ==
+                 baseASD->getSetter() &&
+                 "Storage overrides but setter does not");
+        if (ASD->getMaterializeForSetFunc() &&
+            baseASD->getMaterializeForSetFunc() &&
+            baseASD->isSetterAccessibleFrom(ASD->getDeclContext()))
+          assert(ASD->getMaterializeForSetFunc()->getOverriddenDecl() ==
+                 baseASD->getMaterializeForSetFunc() &&
+                 "Storage override but materializeForSet does not");
+      } else {
+        if (ASD->getGetter())
+          assert(!ASD->getGetter()->getOverriddenDecl() &&
+                 "Storage does not override but getter does");
+        if (ASD->getSetter())
+          assert(!ASD->getSetter()->getOverriddenDecl() &&
+                 "Storage does not override but setter does");
+        if (ASD->getMaterializeForSetFunc())
+          assert(!ASD->getMaterializeForSetFunc()->getOverriddenDecl() &&
+                 "Storage does not override but materializeForSet does");
+      }
+
       verifyCheckedBase(ASD);
     }
 
@@ -1873,7 +1911,7 @@ struct ASTNodeBase {};
         protocolTypes.push_back(proto->getDeclaredType());
       SmallVector<ProtocolDecl *, 4> canonicalProtocols;
       ProtocolCompositionType::get(Ctx, protocolTypes)
-        ->isExistentialType(canonicalProtocols);
+        ->getExistentialTypeProtocols(canonicalProtocols);
       if (nominalProtocols != canonicalProtocols) {
         dumpRef(decl);
         Out << " doesn't have a complete set of protocols\n";
@@ -1978,8 +2016,7 @@ struct ASTNodeBase {};
 
           // Make sure that the replacement type only uses archetypes allowed
           // in the context where the normal conformance exists.
-          auto replacementType
-            = normal->getTypeWitness(assocType, nullptr).getReplacement();
+          auto replacementType = normal->getTypeWitness(assocType, nullptr);
           Verifier(M, normal->getDeclContext())
             .verifyChecked(replacementType);
           continue;
@@ -2640,15 +2677,6 @@ struct ASTNodeBase {};
 
       Out << "exception type does not exist in " << where << "\n";
       abort();
-    }
-
-    void checkMangling(ValueDecl *D) {
-      Mangle::Mangler Mangler;
-      Mangler.mangleDeclName(D);
-      if (Mangler.finalize().empty()) {
-        Out << "Mangler gave empty string for a ValueDecl";
-        abort();
-      }
     }
 
     bool isGoodSourceRange(SourceRange SR) {

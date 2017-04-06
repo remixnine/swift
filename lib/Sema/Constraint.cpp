@@ -31,7 +31,8 @@ Constraint::Constraint(ConstraintKind kind, ArrayRef<Constraint *> constraints,
                        ConstraintLocator *locator, 
                        ArrayRef<TypeVariableType *> typeVars)
   : Kind(kind), HasRestriction(false), HasFix(false), IsActive(false),
-    RememberChoice(false), IsFavored(false), NumTypeVariables(typeVars.size()),
+    IsDisabled(false), RememberChoice(false), IsFavored(false),
+    NumTypeVariables(typeVars.size()),
     Nested(constraints), Locator(locator)
 {
   assert(kind == ConstraintKind::Disjunction);
@@ -43,8 +44,8 @@ Constraint::Constraint(ConstraintKind Kind, Type First, Type Second,
                        ConstraintLocator *locator,
                        ArrayRef<TypeVariableType *> typeVars)
   : Kind(Kind), HasRestriction(false), HasFix(false), IsActive(false),
-    RememberChoice(false), IsFavored(false), NumTypeVariables(typeVars.size()),
-    Types { First, Second }, Locator(locator)
+    IsDisabled(false), RememberChoice(false), IsFavored(false),
+    NumTypeVariables(typeVars.size()), Types { First, Second }, Locator(locator)
 {
   switch (Kind) {
   case ConstraintKind::Bind:
@@ -65,6 +66,7 @@ Constraint::Constraint(ConstraintKind Kind, Type First, Type Second,
   case ConstraintKind::SelfObjectOfProtocol:
   case ConstraintKind::DynamicTypeOf:
   case ConstraintKind::EscapableFunctionOf:
+  case ConstraintKind::OpenedExistentialOf:
   case ConstraintKind::OptionalObject:
     assert(!First.isNull());
     assert(!Second.isNull());
@@ -99,8 +101,9 @@ Constraint::Constraint(ConstraintKind kind, Type first, Type second,
                        ConstraintLocator *locator,
                        ArrayRef<TypeVariableType *> typeVars)
   : Kind(kind), HasRestriction(false), HasFix(false), IsActive(false),
-    RememberChoice(false), IsFavored(false), NumTypeVariables(typeVars.size()),
-    Member { first, second, member, useDC }, Locator(locator)
+    IsDisabled(false), RememberChoice(false), IsFavored(false),
+    NumTypeVariables(typeVars.size()), Member { first, second, member, useDC },
+    Locator(locator)
 {
   assert(kind == ConstraintKind::ValueMember ||
          kind == ConstraintKind::UnresolvedValueMember);
@@ -116,7 +119,7 @@ Constraint::Constraint(Type type, OverloadChoice choice, DeclContext *useDC,
                        ConstraintLocator *locator,
                        ArrayRef<TypeVariableType *> typeVars)
   : Kind(ConstraintKind::BindOverload),
-    HasRestriction(false), HasFix(false), IsActive(false),
+    HasRestriction(false), HasFix(false), IsActive(false), IsDisabled(false),
     RememberChoice(false), IsFavored(false), NumTypeVariables(typeVars.size()),
     Overload{type, choice, useDC}, Locator(locator)
 { 
@@ -128,7 +131,7 @@ Constraint::Constraint(ConstraintKind kind,
                        Type first, Type second, ConstraintLocator *locator,
                        ArrayRef<TypeVariableType *> typeVars)
     : Kind(kind), Restriction(restriction),
-      HasRestriction(true), HasFix(false), IsActive(false),
+      HasRestriction(true), HasFix(false), IsActive(false), IsDisabled(false),
       RememberChoice(false), IsFavored(false), NumTypeVariables(typeVars.size()),
       Types{ first, second }, Locator(locator)
 {
@@ -142,7 +145,7 @@ Constraint::Constraint(ConstraintKind kind, Fix fix,
                        ArrayRef<TypeVariableType *> typeVars)
   : Kind(kind), FixData(fix.getData()), TheFix(fix.getKind()),
     HasRestriction(false), HasFix(true),
-    IsActive(false), RememberChoice(false), IsFavored(false),
+    IsActive(false), IsDisabled(false), RememberChoice(false), IsFavored(false),
     NumTypeVariables(typeVars.size()),
     Types{ first, second }, Locator(locator)
 {
@@ -178,6 +181,7 @@ Constraint *Constraint::clone(ConstraintSystem &cs) const {
   case ConstraintKind::CheckedCast:
   case ConstraintKind::DynamicTypeOf:
   case ConstraintKind::EscapableFunctionOf:
+  case ConstraintKind::OpenedExistentialOf:
   case ConstraintKind::SelfObjectOfProtocol:
   case ConstraintKind::ApplicableFunction:
   case ConstraintKind::OptionalObject:
@@ -213,16 +217,13 @@ void Constraint::print(llvm::raw_ostream &Out, SourceManager *sm) const {
     }
     Out << ":";
 
-    bool first = true;
-    for (auto constraint : getNestedConstraints()) {
-      if (first)
-        first = false;
-      else
-        Out << " or ";
-
-      constraint->print(Out, sm);
-    }
-
+    interleave(getNestedConstraints(),
+               [&](Constraint *constraint) {
+                 if (isDisabled())
+                   Out << "[disabled] ";
+                 constraint->print(Out, sm);
+               },
+               [&] { Out << " or "; });
     return;
   }
 
@@ -253,6 +254,7 @@ void Constraint::print(llvm::raw_ostream &Out, SourceManager *sm) const {
   case ConstraintKind::ApplicableFunction: Out << " applicable fn "; break;
   case ConstraintKind::DynamicTypeOf: Out << " dynamicType type of "; break;
   case ConstraintKind::EscapableFunctionOf: Out << " @escaping type of "; break;
+  case ConstraintKind::OpenedExistentialOf: Out << " opened archetype of "; break;
   case ConstraintKind::OptionalObject:
       Out << " optional with object type "; break;
   case ConstraintKind::BindOverload: {
@@ -477,6 +479,7 @@ gatherReferencedTypeVars(Constraint *constraint,
   case ConstraintKind::ValueMember:
   case ConstraintKind::DynamicTypeOf:
   case ConstraintKind::EscapableFunctionOf:
+  case ConstraintKind::OpenedExistentialOf:
   case ConstraintKind::OptionalObject:
   case ConstraintKind::Defaultable:
     constraint->getSecondType()->getTypeVariables(typeVars);

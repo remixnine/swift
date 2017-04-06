@@ -76,7 +76,10 @@ struct V<T : Canidae> {}
 // CHECK-LABEL: .inferSuperclassRequirement1@
 // CHECK-NEXT: Requirements:
 // CHECK-NEXT:   τ_0_0 : Canidae
-func inferSuperclassRequirement1<T : Carnivora>(_ v: V<T>) {}
+func inferSuperclassRequirement1<T : Carnivora>(
+	_ v: V<T>) {}
+// expected-warning@-2{{redundant superclass constraint 'T' : 'Carnivora'}}
+// expected-note@-2{{superclass constraint 'T' : 'Canidae' inferred from type here}}
 
 // CHECK-LABEL: .inferSuperclassRequirement2@
 // CHECK-NEXT: Requirements:
@@ -126,6 +129,8 @@ func inferSameType1<T, U>(_ x: Model_P3_P4_Eq<T, U>) { }
 // CHECK-NEXT:   τ_0_0[.P3].P3Assoc : P2 [τ_0_0: Explicit @ {{.*}}:25 -> Protocol requirement (via Self.P3Assoc in P3)]
 // CHECK-NEXT:   τ_0_0[.P3].P3Assoc == τ_0_1[.P4].P4Assoc [τ_0_0[.P3].P3Assoc: Explicit]
 func inferSameType2<T : P3, U : P4>(_: T, _: U) where U.P4Assoc : P2, T.P3Assoc == U.P4Assoc {}
+// expected-warning@-1{{redundant conformance constraint 'T.P3Assoc': 'P2'}}
+// expected-note@-2{{conformance constraint 'T.P3Assoc': 'P2' implied here}}
 
 // CHECK-LABEL: .inferSameType3@
 // CHECK-NEXT: Requirements:
@@ -149,8 +154,8 @@ protocol P7 : P6 {
 
 // CHECK-LABEL: P7.nestedSameType1()@
 // CHECK: Canonical generic signature: <τ_0_0 where τ_0_0 : P7, τ_0_0.AssocP6.Element : P6, τ_0_0.AssocP6.Element == τ_0_0.AssocP7.AssocP6.Element>
-extension P7 where AssocP6.Element : P6, 
-        AssocP7.AssocP6.Element : P6,
+extension P7 where AssocP6.Element : P6, // expected-note{{conformance constraint 'Self.AssocP6.Element': 'P6' written here}}
+        AssocP7.AssocP6.Element : P6, // expected-warning{{redundant conformance constraint 'Self.AssocP6.Element': 'P6'}}
         AssocP6.Element == AssocP7.AssocP6.Element {
   func nestedSameType1() { }
 }
@@ -256,3 +261,37 @@ class X13<S: P14> {
   }
 }
 #endif
+
+protocol P16 {
+	associatedtype A
+}
+
+struct X15 { }
+
+struct X16<X, Y> : P16 {
+	typealias A = (X, Y)
+}
+
+// CHECK-LABEL: .X17.bar@
+// CHECK: Generic signature: <S, T, U, V where S == X16<X3, X15>, T == X3, U == X15>
+struct X17<S: P16, T, U> where S.A == (T, U) {
+	func bar<V>(_: V) where S == X16<X3, X15> { }
+}
+
+// Same-type constraints that are self-derived via a parent need to be
+// supressed in the resulting signature.
+protocol P17 { }
+
+protocol P18 {
+  associatedtype A: P17
+}
+
+struct X18: P18, P17 {
+  typealias A = X18
+}
+
+// CHECK-LABEL: .X19.foo@
+// CHECK: Generic signature: <T, U where T == X18>
+struct X19<T: P18> where T == T.A {
+  func foo<U>(_: U) where T == X18 { }
+}

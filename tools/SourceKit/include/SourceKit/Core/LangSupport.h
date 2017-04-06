@@ -285,6 +285,7 @@ struct CursorInfo {
   /// All available actions on the code under cursor.
   ArrayRef<StringRef> AvailableActions;
   bool IsSystem = false;
+  llvm::Optional<unsigned> ParentNameOffset;
 };
 
 struct RangeInfo {
@@ -462,6 +463,9 @@ public:
 
   virtual void editorExtractTextFromComment(StringRef Source,
                                             EditorConsumer &Consumer) = 0;
+
+  virtual void editorConvertMarkupToXML(StringRef Source,
+                                        EditorConsumer &Consumer) = 0;
 
   virtual void editorExpandPlaceholder(StringRef Name, unsigned Offset,
                                        unsigned Length,

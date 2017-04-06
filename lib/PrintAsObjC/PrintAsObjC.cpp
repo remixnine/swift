@@ -12,7 +12,6 @@
 
 #include "swift/PrintAsObjC/PrintAsObjC.h"
 #include "swift/Strings.h"
-#include "swift/AST/AST.h"
 #include "swift/AST/ASTVisitor.h"
 #include "swift/AST/ForeignErrorConvention.h"
 #include "swift/AST/GenericEnvironment.h"
@@ -518,7 +517,7 @@ private:
 
     Optional<ForeignErrorConvention> errorConvention
       = AFD->getForeignErrorConvention();
-    Type rawMethodTy = AFD->getInterfaceType()->castTo<AnyFunctionType>()->getResult();
+    Type rawMethodTy = AFD->getMethodInterfaceType();
     auto methodTy = rawMethodTy->castTo<FunctionType>();
     auto resultTy = getForeignResultType(AFD, methodTy, errorConvention);
 
@@ -631,6 +630,13 @@ private:
 
     if (!skipAvailability) {
       appendAvailabilityAttribute(AFD);
+    }
+
+    if (isa<FuncDecl>(AFD) && cast<FuncDecl>(AFD)->isAccessor()) {
+      printSwift3ObjCDeprecatedInference(
+                              cast<FuncDecl>(AFD)->getAccessorStorageDecl());
+    } else {
+      printSwift3ObjCDeprecatedInference(AFD);
     }
 
     os << ";\n";
@@ -804,7 +810,33 @@ private:
       }
     }
   }
-    
+
+  void printSwift3ObjCDeprecatedInference(ValueDecl *VD) {
+    auto attr = VD->getAttrs().getAttribute<ObjCAttr>();
+    if (!attr || !attr->isSwift3Inferred())
+      return;
+
+    os << " SWIFT_DEPRECATED_MSG(\"Swift ";
+    if (isa<VarDecl>(VD))
+      os << "property";
+    else if (isa<SubscriptDecl>(VD))
+      os << "subscript";
+    else if (isa<ConstructorDecl>(VD))
+      os << "initializer";
+    else
+      os << "method";
+    os << " '";
+    auto nominal =
+      VD->getDeclContext()->getAsNominalTypeOrNominalTypeExtensionContext();
+    printEncodedString(nominal->getName().str(), /*includeQuotes=*/false);
+    os << ".";
+    SmallString<32> scratch;
+    printEncodedString(VD->getFullName().getString(scratch),
+                       /*includeQuotes=*/false);
+    os << "' uses '@objc' inference deprecated in Swift 4; add '@objc' to "
+       <<   "provide an Objective-C entrypoint\")";
+  }
+
   void visitFuncDecl(FuncDecl *FD) {
     if (FD->getDeclContext()->isTypeContext())
       printAbstractFunctionAsMethod(FD, FD->isStatic());
@@ -894,7 +926,7 @@ private:
       if (auto unwrappedTy = copyTy->getAnyOptionalObjectType(optionalType))
         copyTy = unwrappedTy;
       auto nominal = copyTy->getNominalOrBoundGenericNominal();
-      if (dyn_cast_or_null<StructDecl>(nominal)) {
+      if (nominal && isa<StructDecl>(nominal)) {
         if (nominal == ctx.getArrayDecl() ||
             nominal == ctx.getDictionaryDecl() ||
             nominal == ctx.getSetDecl() ||
@@ -921,7 +953,7 @@ private:
         case FunctionTypeRepresentation::CFunctionPointer:
           break;
         }
-      } else if ((dyn_cast_or_null<ClassDecl>(nominal) &&
+      } else if ((nominal && isa<ClassDecl>(nominal) &&
                   cast<ClassDecl>(nominal)->getForeignClassKind() !=
                     ClassDecl::ForeignKind::CFType) ||
                  (copyTy->isObjCExistentialType() && !isCFTypeRef(copyTy))) {
@@ -966,6 +998,8 @@ private:
     } else {
       print(ty, OTK_None, objCName);
     }
+
+    printSwift3ObjCDeprecatedInference(VD);
 
     os << ";";
     if (VD->isStatic()) {
@@ -1389,7 +1423,7 @@ private:
   void printCollectionElement(Type ty) {
     ASTContext &ctx = M.getASTContext();
 
-    auto isSwiftNewtype = [&ctx](const StructDecl *SD) -> bool {
+    auto isSwiftNewtype = [](const StructDecl *SD) -> bool {
       if (!SD)
         return false;
       auto *clangDecl = SD->getClangDecl();
@@ -2578,8 +2612,8 @@ public:
       // alphabetically first.
       auto mismatch =
         std::mismatch(lhsProtos.begin(), lhsProtos.end(), rhsProtos.begin(),
-                      [getSortName] (const ProtocolDecl *nextLHSProto,
-                                     const ProtocolDecl *nextRHSProto) {
+                      [] (const ProtocolDecl *nextLHSProto,
+                          const ProtocolDecl *nextRHSProto) {
         return nextLHSProto->getName() != nextRHSProto->getName();
       });
       if (mismatch.first == lhsProtos.end())

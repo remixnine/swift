@@ -20,6 +20,7 @@
 #include "swift/AST/ASTVisitor.h"
 #include "swift/AST/GenericEnvironment.h"
 #include "swift/AST/NameLookup.h"
+#include "swift/AST/ParameterList.h"
 #include "swift/AST/Types.h"
 #include "swift/Parse/Lexer.h"
 #include "swift/ClangImporter/ClangModule.h" // FIXME: SDK overlay semantics
@@ -182,15 +183,20 @@ public:
     if (isa<ClassDecl>(D))
       return;
 
-    // 'final' only makes sense in the context of a class
-    // declaration or a protocol extension.  Reject it on global functions,
-    // structs, enums, etc.
-    if (D->getDeclContext()->getAsProtocolExtensionContext()) {
-      // Accept and remove the 'final' attribute from members of protocol
-      // extensions.
+    // 'final' only makes sense in the context of a class declaration.
+    // Reject it on global functions, protocols, structs, enums, etc.
+    if (!D->getDeclContext()->getAsClassOrClassExtensionContext()) {
+      if (D->getDeclContext()->getAsProtocolExtensionContext())
+        TC.diagnose(attr->getLocation(), 
+          diag::protocol_extension_cannot_be_final)
+          .fixItRemove(attr->getRange());
+      else
+        TC.diagnose(attr->getLocation(), diag::member_cannot_be_final)
+          .fixItRemove(attr->getRange());
+
+      // Remove the attribute so child declarations are not flagged as final
+      // and duplicate the error message.
       D->getAttrs().removeAttribute(attr);
-    } else if (!D->getDeclContext()->getAsClassOrClassExtensionContext()) {
-      diagnoseAndRemoveAttr(attr, diag::member_cannot_be_final);
       return;
     }
   }
@@ -228,6 +234,7 @@ public:
   void visitSetterAccessibilityAttr(SetterAccessibilityAttr *attr);
   bool visitAbstractAccessibilityAttr(AbstractAccessibilityAttr *attr);
   void visitSILStoredAttr(SILStoredAttr *attr);
+  void visitObjCMembersAttr(ObjCMembersAttr *attr);
 };
 } // end anonymous namespace
 
@@ -287,6 +294,10 @@ void AttributeEarlyChecker::visitDynamicAttr(DynamicAttr *attr) {
   // Members cannot be both dynamic and final.
   if (D->getAttrs().hasAttribute<FinalAttr>())
     return diagnoseAndRemoveAttr(attr, diag::dynamic_with_final);
+
+  // Members cannot be both dynamic and @nonobjc.
+  if (D->getAttrs().hasAttribute<NonObjCAttr>())
+    return diagnoseAndRemoveAttr(attr, diag::dynamic_with_nonobjc);
 }
 
 
@@ -623,6 +634,10 @@ void AttributeEarlyChecker::visitSetterAccessibilityAttr(
   }
 }
 
+void AttributeEarlyChecker::visitObjCMembersAttr(ObjCMembersAttr *attr) {
+  if (!isa<ClassDecl>(D))
+    return diagnoseAndRemoveAttr(attr, diag::objcmembers_attribute_nonclass);
+}
 
 void TypeChecker::checkDeclAttributesEarly(Decl *D) {
   // Don't perform early attribute validation more than once.
@@ -739,6 +754,7 @@ public:
     IGNORED_ATTR(Testable)
     IGNORED_ATTR(WarnUnqualifiedAccess)
     IGNORED_ATTR(ShowInInterface)
+    IGNORED_ATTR(ObjCMembers)
 #undef IGNORED_ATTR
 
   void visitAvailableAttr(AvailableAttr *attr);
@@ -826,7 +842,7 @@ static bool isRelaxedIBAction(TypeChecker &TC) {
 void AttributeChecker::visitIBActionAttr(IBActionAttr *attr) {
   // IBActions instance methods must have type Class -> (...) -> ().
   auto *FD = cast<FuncDecl>(D);
-  Type CurriedTy = FD->getInterfaceType()->castTo<AnyFunctionType>()->getResult();
+  Type CurriedTy = FD->getMethodInterfaceType();
   Type ResultTy = CurriedTy->castTo<AnyFunctionType>()->getResult();
   if (!ResultTy->isEqual(TupleType::getEmpty(TC.Context))) {
     TC.diagnose(D, diag::invalid_ibaction_result, ResultTy);
@@ -1008,7 +1024,8 @@ void AttributeChecker::visitFinalAttr(FinalAttr *attr) {
   // We currently only support final on var/let, func and subscript
   // declarations.
   if (!isa<VarDecl>(D) && !isa<FuncDecl>(D) && !isa<SubscriptDecl>(D)) {
-    TC.diagnose(attr->getLocation(), diag::final_not_allowed_here);
+    TC.diagnose(attr->getLocation(), diag::final_not_allowed_here)
+      .fixItRemove(attr->getRange());
     return;
   }
 
@@ -1017,7 +1034,8 @@ void AttributeChecker::visitFinalAttr(FinalAttr *attr) {
       unsigned Kind = 2;
       if (auto *VD = dyn_cast<VarDecl>(FD->getAccessorStorageDecl()))
         Kind = VD->isLet() ? 1 : 0;
-      TC.diagnose(attr->getLocation(), diag::final_not_on_accessors, Kind);
+      TC.diagnose(attr->getLocation(), diag::final_not_on_accessors, Kind)
+        .fixItRemove(attr->getRange());
       return;
     }
   }
@@ -1060,7 +1078,7 @@ void AttributeChecker::checkOperatorAttribute(DeclAttribute *attr) {
 
   // Only functions with an operator identifier can be declared with as an
   // operator.
-  if (!FD->getName().isOperator()) {
+  if (!FD->isOperator()) {
     TC.diagnose(D->getStartLoc(), diag::attribute_requires_operator_identifier,
                 attr->getAttrName());
     attr->setInvalid();
@@ -1811,7 +1829,7 @@ void AttributeChecker::visitVersionedAttr(VersionedAttr *attr) {
     TC.diagnose(attr->getLocation(),
                 diag::versioned_attr_with_explicit_accessibility,
                 VD->getName(),
-                getAccessForDiagnostics(VD))
+                VD->getFormalAccess())
         .fixItRemove(attr->getRangeWithAt());
     attr->setInvalid();
     return;

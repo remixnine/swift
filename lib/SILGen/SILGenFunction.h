@@ -38,7 +38,11 @@ class LValue;
 class ManagedValue;
 class RValue;
 class TemporaryInitialization;
-  
+class CalleeTypeInfo;
+class ResultPlan;
+using ResultPlanPtr = std::unique_ptr<ResultPlan>;
+class ArgumentScope;
+
 /// Internal context information for the SILGenFunction visitor.
 ///
 /// In general, emission methods which take an SGFContext indicate
@@ -106,13 +110,32 @@ public:
     return state.getPointer();
   }
 
-  /// If we have an emit into, return the address of the emit into. Otherwise,
-  /// return an empty SILValue.
-  SILValue getAddressForInPlaceInitialization() const {
+  /// Try to get the address of the emit-into initialization if we can.
+  /// Otherwise, return an empty SILValue.
+  ///
+  /// Note that, if this returns a non-empty address, the caller must
+  /// finish the emit-into initialization.
+  SILValue getAddressForInPlaceInitialization(SILGenFunction &SGF,
+                                              SILLocation loc) const {
     if (auto *init = getEmitInto()) {
-      return init->getAddressForInPlaceInitialization();
+      if (init->canPerformInPlaceInitialization())
+        return init->getAddressForInPlaceInitialization(SGF, loc);
     }
     return SILValue();
+  }
+
+  /// If getAddressForInPlaceInitialization did (or would have)
+  /// returned a non-null address, finish the initialization and
+  /// return true.  Otherwise, return false.
+  bool finishInPlaceInitialization(SILGenFunction &SGF) const {
+    if (auto *init = getEmitInto()) {
+      if (init->canPerformInPlaceInitialization()) {
+        init->finishInitialization(SGF);
+        return true;
+      }
+    }
+
+    return false;
   }
 
   /// Return true if a ManagedValue producer is allowed to return at
@@ -196,6 +219,16 @@ enum class CaptureEmission {
   /// Captures are being emitted for partial application to form a closure
   /// value.
   PartialApplication,
+};
+
+/// Parameter to \c SILGenFunction::emitAddressOfLValue that indicates
+/// what kind of instrumentation should be emitted when compiling under
+/// Thread Sanitizer.
+enum class TSanKind : bool {
+  None = 0,
+
+  /// Instrument the LValue access as an inout access.
+  InoutAccess
 };
 
 /// Represents an LValue opened for mutating access.
@@ -453,7 +486,8 @@ public:
   SILFunction &getFunction() { return F; }
   SILModule &getModule() { return F.getModule(); }
   SILGenBuilder &getBuilder() { return B; }
-  
+  SILOptions &getOptions() { return getModule().getOptions(); }
+
   const TypeLowering &getTypeLowering(AbstractionPattern orig, Type subst) {
     return SGM.Types.getTypeLowering(orig, subst);
   }
@@ -489,6 +523,10 @@ public:
   SILConstantInfo getConstantInfo(SILDeclRef constant) {
     return SGM.Types.getConstantInfo(constant);
   }
+
+  Optional<SILAccessEnforcement> getStaticEnforcement(VarDecl *var = nullptr);
+  Optional<SILAccessEnforcement> getDynamicEnforcement(VarDecl *var = nullptr);
+  Optional<SILAccessEnforcement> getUnknownEnforcement(VarDecl *var = nullptr);
 
   SourceManager &getSourceManager() { return SGM.M.getASTContext().SourceMgr; }
 
@@ -881,16 +919,16 @@ public:
 
   /// OpenedArchetypes - Mappings of opened archetypes back to the
   /// instruction which opened them.
-  llvm::DenseMap<CanType, SILValue> ArchetypeOpenings;
+  llvm::DenseMap<ArchetypeType *, SILValue> ArchetypeOpenings;
 
-  SILValue getArchetypeOpeningSite(CanArchetypeType archetype) const {
+  SILValue getArchetypeOpeningSite(ArchetypeType *archetype) const {
     auto it = ArchetypeOpenings.find(archetype);
     assert(it != ArchetypeOpenings.end() &&
            "opened archetype was not registered with SILGenFunction");
     return it->second;
   }
 
-  void setArchetypeOpeningSite(CanArchetypeType archetype, SILValue site) {
+  void setArchetypeOpeningSite(ArchetypeType *archetype, SILValue site) {
     ArchetypeOpenings.insert({archetype, site});
   }
 
@@ -913,7 +951,7 @@ public:
   SILGenFunction::OpaqueValueState
   emitOpenExistential(SILLocation loc,
                       ManagedValue existentialValue,
-                      CanArchetypeType openedArchetype,
+                      ArchetypeType *openedArchetype,
                       SILType loweredOpenedType,
                       AccessKind accessKind);
 
@@ -1235,7 +1273,9 @@ public:
   void emitCopyLValueInto(SILLocation loc, LValue &&src,
                           Initialization *dest);
   ManagedValue emitAddressOfLValue(SILLocation loc, LValue &&src,
-                                   AccessKind accessKind);
+                                   AccessKind accessKind,
+                                   TSanKind tsanKind = TSanKind::None);
+
   RValue emitLoadOfLValue(SILLocation loc, LValue &&src, SGFContext C,
                           bool isGuaranteedValid = false);
 
@@ -1270,16 +1310,10 @@ public:
   /// lowered appropriately for the abstraction level but that the
   /// result does need to be turned back into something matching a
   /// formal type.
-  RValue emitApply(SILLocation loc,
-                   ManagedValue fn,
-                   SubstitutionList subs,
+  RValue emitApply(ResultPlanPtr &&resultPlan, ArgumentScope &&argScope,
+                   SILLocation loc, ManagedValue fn, SubstitutionList subs,
                    ArrayRef<ManagedValue> args,
-                   CanSILFunctionType substFnType,
-                   AbstractionPattern origResultType,
-                   CanType substResultType,
-                   ApplyOptions options,
-                   Optional<SILFunctionTypeRepresentation> overrideRep,
-                   const Optional<ForeignErrorConvention> &foreignError,
+                   const CalleeTypeInfo &calleeTypeInfo, ApplyOptions options,
                    SGFContext evalContext);
 
   RValue emitApplyOfDefaultArgGenerator(SILLocation loc,

@@ -34,6 +34,7 @@ import ArrayOfRef
 import ArraySubscript
 import BitCount
 import ByteSwap
+import CString
 import Calculator
 import CaptureProp
 import CharacterLiteralsLarge
@@ -48,7 +49,9 @@ import DictionaryBridge
 import DictionaryLiteral
 import DictionaryRemove
 import DictionarySwap
+import DropLast
 import ErrorHandling
+import ExistentialPerformance
 import Fibonacci
 import GlobalClass
 import Hanoi
@@ -58,6 +61,7 @@ import Histogram
 import Integrate
 import IterateData
 import Join
+import LazyFilter
 import LinkedList
 import MapReduce
 import Memset
@@ -98,9 +102,12 @@ import StaticArray
 import StrComplexWalk
 import StrToInt
 import StringBuilder
+import StringEdits
 import StringInterpolation
+import StringMatch
 import StringTests
 import StringWalk
+import Suffix
 import SuperChars
 import TwoSum
 import TypeFlood
@@ -143,6 +150,9 @@ precommitTests = [
   "ArrayValueProp4": run_ArrayValueProp4,
   "BitCount": run_BitCount,
   "ByteSwap": run_ByteSwap,
+  "CStringLongAscii": run_CStringLongAscii,
+  "CStringLongNonAscii": run_CStringLongNonAscii,
+  "CStringShortAscii": run_CStringShortAscii,
   "Calculator": run_Calculator,
   "CaptureProp": run_CaptureProp,
   "CharacterLiteralsLarge": run_CharacterLiteralsLarge,
@@ -162,7 +172,110 @@ precommitTests = [
   "DictionaryRemoveOfObjects": run_DictionaryRemoveOfObjects,
   "DictionarySwap": run_DictionarySwap,
   "DictionarySwapOfObjects": run_DictionarySwapOfObjects,
+  "DropLastAnySequence": run_DropLastAnySequence,
+  "DropLastArray": run_DropLastArray,
+  "DropLastCountableRange": run_DropLastCountableRange,
+  "DropLastSequence": run_DropLastSequence,
   "ErrorHandling": run_ErrorHandling,
+  "ExistentialTestArrayConditionalShift_ClassValueBuffer1": run_ExistentialTestArrayConditionalShift_ClassValueBuffer1,
+  "ExistentialTestArrayConditionalShift_ClassValueBuffer2": run_ExistentialTestArrayConditionalShift_ClassValueBuffer2,
+  "ExistentialTestArrayConditionalShift_ClassValueBuffer3": run_ExistentialTestArrayConditionalShift_ClassValueBuffer3,
+  "ExistentialTestArrayConditionalShift_ClassValueBuffer4": run_ExistentialTestArrayConditionalShift_ClassValueBuffer4,
+  "ExistentialTestArrayConditionalShift_IntValueBuffer0": run_ExistentialTestArrayConditionalShift_IntValueBuffer0,
+  "ExistentialTestArrayConditionalShift_IntValueBuffer1": run_ExistentialTestArrayConditionalShift_IntValueBuffer1,
+  "ExistentialTestArrayConditionalShift_IntValueBuffer2": run_ExistentialTestArrayConditionalShift_IntValueBuffer2,
+  "ExistentialTestArrayConditionalShift_IntValueBuffer3": run_ExistentialTestArrayConditionalShift_IntValueBuffer3,
+  "ExistentialTestArrayConditionalShift_IntValueBuffer4": run_ExistentialTestArrayConditionalShift_IntValueBuffer4,
+  "ExistentialTestArrayMutating_ClassValueBuffer1": run_ExistentialTestArrayMutating_ClassValueBuffer1,
+  "ExistentialTestArrayMutating_ClassValueBuffer2": run_ExistentialTestArrayMutating_ClassValueBuffer2,
+  "ExistentialTestArrayMutating_ClassValueBuffer3": run_ExistentialTestArrayMutating_ClassValueBuffer3,
+  "ExistentialTestArrayMutating_ClassValueBuffer4": run_ExistentialTestArrayMutating_ClassValueBuffer4,
+  "ExistentialTestArrayMutating_IntValueBuffer0": run_ExistentialTestArrayMutating_IntValueBuffer0,
+  "ExistentialTestArrayMutating_IntValueBuffer1": run_ExistentialTestArrayMutating_IntValueBuffer1,
+  "ExistentialTestArrayMutating_IntValueBuffer2": run_ExistentialTestArrayMutating_IntValueBuffer2,
+  "ExistentialTestArrayMutating_IntValueBuffer3": run_ExistentialTestArrayMutating_IntValueBuffer3,
+  "ExistentialTestArrayMutating_IntValueBuffer4": run_ExistentialTestArrayMutating_IntValueBuffer4,
+  "ExistentialTestArrayOneMethodCall_ClassValueBuffer1": run_ExistentialTestArrayOneMethodCall_ClassValueBuffer1,
+  "ExistentialTestArrayOneMethodCall_ClassValueBuffer2": run_ExistentialTestArrayOneMethodCall_ClassValueBuffer2,
+  "ExistentialTestArrayOneMethodCall_ClassValueBuffer3": run_ExistentialTestArrayOneMethodCall_ClassValueBuffer3,
+  "ExistentialTestArrayOneMethodCall_ClassValueBuffer4": run_ExistentialTestArrayOneMethodCall_ClassValueBuffer4,
+  "ExistentialTestArrayOneMethodCall_IntValueBuffer0": run_ExistentialTestArrayOneMethodCall_IntValueBuffer0,
+  "ExistentialTestArrayOneMethodCall_IntValueBuffer1": run_ExistentialTestArrayOneMethodCall_IntValueBuffer1,
+  "ExistentialTestArrayOneMethodCall_IntValueBuffer2": run_ExistentialTestArrayOneMethodCall_IntValueBuffer2,
+  "ExistentialTestArrayOneMethodCall_IntValueBuffer3": run_ExistentialTestArrayOneMethodCall_IntValueBuffer3,
+  "ExistentialTestArrayOneMethodCall_IntValueBuffer4": run_ExistentialTestArrayOneMethodCall_IntValueBuffer4,
+  "ExistentialTestArrayShift_ClassValueBuffer1": run_ExistentialTestArrayShift_ClassValueBuffer1,
+  "ExistentialTestArrayShift_ClassValueBuffer2": run_ExistentialTestArrayShift_ClassValueBuffer2,
+  "ExistentialTestArrayShift_ClassValueBuffer3": run_ExistentialTestArrayShift_ClassValueBuffer3,
+  "ExistentialTestArrayShift_ClassValueBuffer4": run_ExistentialTestArrayShift_ClassValueBuffer4,
+  "ExistentialTestArrayShift_IntValueBuffer0": run_ExistentialTestArrayShift_IntValueBuffer0,
+  "ExistentialTestArrayShift_IntValueBuffer1": run_ExistentialTestArrayShift_IntValueBuffer1,
+  "ExistentialTestArrayShift_IntValueBuffer2": run_ExistentialTestArrayShift_IntValueBuffer2,
+  "ExistentialTestArrayShift_IntValueBuffer3": run_ExistentialTestArrayShift_IntValueBuffer3,
+  "ExistentialTestArrayShift_IntValueBuffer4": run_ExistentialTestArrayShift_IntValueBuffer4,
+  "ExistentialTestArrayTwoMethodCalls_ClassValueBuffer1": run_ExistentialTestArrayTwoMethodCalls_ClassValueBuffer1,
+  "ExistentialTestArrayTwoMethodCalls_ClassValueBuffer2": run_ExistentialTestArrayTwoMethodCalls_ClassValueBuffer2,
+  "ExistentialTestArrayTwoMethodCalls_ClassValueBuffer3": run_ExistentialTestArrayTwoMethodCalls_ClassValueBuffer3,
+  "ExistentialTestArrayTwoMethodCalls_ClassValueBuffer4": run_ExistentialTestArrayTwoMethodCalls_ClassValueBuffer4,
+  "ExistentialTestArrayTwoMethodCalls_IntValueBuffer0": run_ExistentialTestArrayTwoMethodCalls_IntValueBuffer0,
+  "ExistentialTestArrayTwoMethodCalls_IntValueBuffer1": run_ExistentialTestArrayTwoMethodCalls_IntValueBuffer1,
+  "ExistentialTestArrayTwoMethodCalls_IntValueBuffer2": run_ExistentialTestArrayTwoMethodCalls_IntValueBuffer2,
+  "ExistentialTestArrayTwoMethodCalls_IntValueBuffer3": run_ExistentialTestArrayTwoMethodCalls_IntValueBuffer3,
+  "ExistentialTestArrayTwoMethodCalls_IntValueBuffer4": run_ExistentialTestArrayTwoMethodCalls_IntValueBuffer4,
+  "ExistentialTestMutatingAndNonMutating_ClassValueBuffer1": run_ExistentialTestMutatingAndNonMutating_ClassValueBuffer1,
+  "ExistentialTestMutatingAndNonMutating_ClassValueBuffer2": run_ExistentialTestMutatingAndNonMutating_ClassValueBuffer2,
+  "ExistentialTestMutatingAndNonMutating_ClassValueBuffer3": run_ExistentialTestMutatingAndNonMutating_ClassValueBuffer3,
+  "ExistentialTestMutatingAndNonMutating_ClassValueBuffer4": run_ExistentialTestMutatingAndNonMutating_ClassValueBuffer4,
+  "ExistentialTestMutatingAndNonMutating_IntValueBuffer0": run_ExistentialTestMutatingAndNonMutating_IntValueBuffer0,
+  "ExistentialTestMutatingAndNonMutating_IntValueBuffer1": run_ExistentialTestMutatingAndNonMutating_IntValueBuffer1,
+  "ExistentialTestMutatingAndNonMutating_IntValueBuffer2": run_ExistentialTestMutatingAndNonMutating_IntValueBuffer2,
+  "ExistentialTestMutatingAndNonMutating_IntValueBuffer3": run_ExistentialTestMutatingAndNonMutating_IntValueBuffer3,
+  "ExistentialTestMutatingAndNonMutating_IntValueBuffer4": run_ExistentialTestMutatingAndNonMutating_IntValueBuffer4,
+  "ExistentialTestMutating_ClassValueBuffer1": run_ExistentialTestMutating_ClassValueBuffer1,
+  "ExistentialTestMutating_ClassValueBuffer2": run_ExistentialTestMutating_ClassValueBuffer2,
+  "ExistentialTestMutating_ClassValueBuffer3": run_ExistentialTestMutating_ClassValueBuffer3,
+  "ExistentialTestMutating_ClassValueBuffer4": run_ExistentialTestMutating_ClassValueBuffer4,
+  "ExistentialTestMutating_IntValueBuffer0": run_ExistentialTestMutating_IntValueBuffer0,
+  "ExistentialTestMutating_IntValueBuffer1": run_ExistentialTestMutating_IntValueBuffer1,
+  "ExistentialTestMutating_IntValueBuffer2": run_ExistentialTestMutating_IntValueBuffer2,
+  "ExistentialTestMutating_IntValueBuffer3": run_ExistentialTestMutating_IntValueBuffer3,
+  "ExistentialTestMutating_IntValueBuffer4": run_ExistentialTestMutating_IntValueBuffer4,
+  "ExistentialTestOneMethodCall_ClassValueBuffer1": run_ExistentialTestOneMethodCall_ClassValueBuffer1,
+  "ExistentialTestOneMethodCall_ClassValueBuffer2": run_ExistentialTestOneMethodCall_ClassValueBuffer2,
+  "ExistentialTestOneMethodCall_ClassValueBuffer3": run_ExistentialTestOneMethodCall_ClassValueBuffer3,
+  "ExistentialTestOneMethodCall_ClassValueBuffer4": run_ExistentialTestOneMethodCall_ClassValueBuffer4,
+  "ExistentialTestOneMethodCall_IntValueBuffer0": run_ExistentialTestOneMethodCall_IntValueBuffer0,
+  "ExistentialTestOneMethodCall_IntValueBuffer1": run_ExistentialTestOneMethodCall_IntValueBuffer1,
+  "ExistentialTestOneMethodCall_IntValueBuffer2": run_ExistentialTestOneMethodCall_IntValueBuffer2,
+  "ExistentialTestOneMethodCall_IntValueBuffer3": run_ExistentialTestOneMethodCall_IntValueBuffer3,
+  "ExistentialTestOneMethodCall_IntValueBuffer4": run_ExistentialTestOneMethodCall_IntValueBuffer4,
+  "ExistentialTestPassExistentialOneMethodCall_ClassValueBuffer1": run_ExistentialTestPassExistentialOneMethodCall_ClassValueBuffer1,
+  "ExistentialTestPassExistentialOneMethodCall_ClassValueBuffer2": run_ExistentialTestPassExistentialOneMethodCall_ClassValueBuffer2,
+  "ExistentialTestPassExistentialOneMethodCall_ClassValueBuffer3": run_ExistentialTestPassExistentialOneMethodCall_ClassValueBuffer3,
+  "ExistentialTestPassExistentialOneMethodCall_ClassValueBuffer4": run_ExistentialTestPassExistentialOneMethodCall_ClassValueBuffer4,
+  "ExistentialTestPassExistentialOneMethodCall_IntValueBuffer0": run_ExistentialTestPassExistentialOneMethodCall_IntValueBuffer0,
+  "ExistentialTestPassExistentialOneMethodCall_IntValueBuffer1": run_ExistentialTestPassExistentialOneMethodCall_IntValueBuffer1,
+  "ExistentialTestPassExistentialOneMethodCall_IntValueBuffer2": run_ExistentialTestPassExistentialOneMethodCall_IntValueBuffer2,
+  "ExistentialTestPassExistentialOneMethodCall_IntValueBuffer3": run_ExistentialTestPassExistentialOneMethodCall_IntValueBuffer3,
+  "ExistentialTestPassExistentialOneMethodCall_IntValueBuffer4": run_ExistentialTestPassExistentialOneMethodCall_IntValueBuffer4,
+  "ExistentialTestPassExistentialTwoMethodCalls_ClassValueBuffer1": run_ExistentialTestPassExistentialTwoMethodCalls_ClassValueBuffer1,
+  "ExistentialTestPassExistentialTwoMethodCalls_ClassValueBuffer2": run_ExistentialTestPassExistentialTwoMethodCalls_ClassValueBuffer2,
+  "ExistentialTestPassExistentialTwoMethodCalls_ClassValueBuffer3": run_ExistentialTestPassExistentialTwoMethodCalls_ClassValueBuffer3,
+  "ExistentialTestPassExistentialTwoMethodCalls_ClassValueBuffer4": run_ExistentialTestPassExistentialTwoMethodCalls_ClassValueBuffer4,
+  "ExistentialTestPassExistentialTwoMethodCalls_IntValueBuffer0": run_ExistentialTestPassExistentialTwoMethodCalls_IntValueBuffer0,
+  "ExistentialTestPassExistentialTwoMethodCalls_IntValueBuffer1": run_ExistentialTestPassExistentialTwoMethodCalls_IntValueBuffer1,
+  "ExistentialTestPassExistentialTwoMethodCalls_IntValueBuffer2": run_ExistentialTestPassExistentialTwoMethodCalls_IntValueBuffer2,
+  "ExistentialTestPassExistentialTwoMethodCalls_IntValueBuffer3": run_ExistentialTestPassExistentialTwoMethodCalls_IntValueBuffer3,
+  "ExistentialTestPassExistentialTwoMethodCalls_IntValueBuffer4": run_ExistentialTestPassExistentialTwoMethodCalls_IntValueBuffer4,
+  "ExistentialTestTwoMethodCalls_ClassValueBuffer1": run_ExistentialTestTwoMethodCalls_ClassValueBuffer1,
+  "ExistentialTestTwoMethodCalls_ClassValueBuffer2": run_ExistentialTestTwoMethodCalls_ClassValueBuffer2,
+  "ExistentialTestTwoMethodCalls_ClassValueBuffer3": run_ExistentialTestTwoMethodCalls_ClassValueBuffer3,
+  "ExistentialTestTwoMethodCalls_ClassValueBuffer4": run_ExistentialTestTwoMethodCalls_ClassValueBuffer4,
+  "ExistentialTestTwoMethodCalls_IntValueBuffer0": run_ExistentialTestTwoMethodCalls_IntValueBuffer0,
+  "ExistentialTestTwoMethodCalls_IntValueBuffer1": run_ExistentialTestTwoMethodCalls_IntValueBuffer1,
+  "ExistentialTestTwoMethodCalls_IntValueBuffer2": run_ExistentialTestTwoMethodCalls_IntValueBuffer2,
+  "ExistentialTestTwoMethodCalls_IntValueBuffer3": run_ExistentialTestTwoMethodCalls_IntValueBuffer3,
+  "ExistentialTestTwoMethodCalls_IntValueBuffer4": run_ExistentialTestTwoMethodCalls_IntValueBuffer4,
   "GlobalClass": run_GlobalClass,
   "Hanoi": run_Hanoi,
   "HashQuadratic": run_HashQuadratic,
@@ -171,6 +284,8 @@ precommitTests = [
   "Integrate": run_Integrate,
   "IterateData": run_IterateData,
   "Join": run_Join,
+  "LazilyFilteredArrays": run_LazilyFilteredArrays,
+  "LazilyFilteredRange": run_LazilyFilteredRange,
   "LinkedList": run_LinkedList,
   "MapReduce": run_MapReduce,
   "MapReduceAnyCollection": run_MapReduceAnyCollection,
@@ -267,15 +382,24 @@ precommitTests = [
   "StaticArray": run_StaticArray,
   "StrComplexWalk": run_StrComplexWalk,
   "StrToInt": run_StrToInt,
+  "StringAdder": run_StringAdder,
   "StringBuilder": run_StringBuilder,
+  "StringBuilderLong": run_StringBuilderLong,
+  "StringEdits": run_StringEdits,
   "StringEqualPointerComparison": run_StringEqualPointerComparison,
   "StringHasPrefix": run_StringHasPrefix,
   "StringHasPrefixUnicode": run_StringHasPrefixUnicode,
   "StringHasSuffix": run_StringHasSuffix,
   "StringHasSuffixUnicode": run_StringHasSuffixUnicode,
   "StringInterpolation": run_StringInterpolation,
+  "StringMatch": run_StringMatch,
+  "StringUTF16Builder": run_StringUTF16Builder,
   "StringWalk": run_StringWalk,
   "StringWithCString": run_StringWithCString,
+  "SuffixAnySequence": run_SuffixAnySequence,
+  "SuffixArray": run_SuffixArray,
+  "SuffixCountableRange": run_SuffixCountableRange,
+  "SuffixSequence": run_SuffixSequence,
   "SuperChars": run_SuperChars,
   "TwoSum": run_TwoSum,
   "TypeFlood": run_TypeFlood,

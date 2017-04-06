@@ -1,4 +1,4 @@
-// RUN: %target-swift-ide-test -new-mangling-for-tests -print-comments -source-filename %S/Inputs/comment_extensions.swift -comments-xml-schema %S/../../bindings/xml/comment-xml-schema.rng | %FileCheck %s
+// RUN: %target-swift-ide-test -print-comments -source-filename %S/Inputs/comment_extensions.swift -comments-xml-schema %S/../../bindings/xml/comment-xml-schema.rng | %FileCheck %s
 
 // Content is in separate file in ./Inputs due to the "requires" keyword getting
 // recognized by lit.
@@ -48,14 +48,14 @@
 
 // CHECK: {{.*}}DocCommentAsXML=[<Function file="{{.*}}" line="{{.*}}" column="{{.*}}"><Name>warning()</Name><USR>s:14swift_ide_test7warningyyF</USR><Declaration>func warning()</Declaration><Discussion><Warning><Para>Share the road.</Para></Warning></Discussion></Function>]
 
-// CHECK: {{.*}}DocCommentAsXML=[<Function file="{{.*}}" line="{{.*}}" column="{{.*}}"><Name>imageWithEmptyURLAndBogusTitle()</Name><USR>s:14swift_ide_test30imageWithEmptyURLAndBogusTitleyyF</USR><Declaration>func imageWithEmptyURLAndBogusTitle()</Declaration><Abstract><Para><rawHTML><![CDATA[<img src="" alt="/bogus/url/as/title"\>]]></rawHTML></Para></Abstract></Function>]
+// CHECK: {{.*}}DocCommentAsXML=[<Function file="{{.*}}" line="{{.*}}" column="{{.*}}"><Name>imageWithEmptyURLAndBogusTitle()</Name><USR>s:14swift_ide_test30imageWithEmptyURLAndBogusTitleyyF</USR><Declaration>func imageWithEmptyURLAndBogusTitle()</Declaration><Abstract><Para><rawHTML><![CDATA[<img src="" alt="/bogus/url/as/title"/>]]></rawHTML></Para></Abstract></Function>]
 
-// CHECK: {{.*}}DocCommentAsXML=[<Function file="{{.*}}" line="{{.*}}" column="{{.*}}"><Name>imageTitleAndAlt()</Name><USR>s:14swift_ide_test16imageTitleAndAltyyF</USR><Declaration>func imageTitleAndAlt()</Declaration><Abstract><Para>Brief.</Para></Abstract><Discussion><Para><rawHTML><![CDATA[<img src="/swift.png" title="Image Title" alt="Image Alt"\>]]></rawHTML></Para></Discussion></Function>]
+// CHECK: {{.*}}DocCommentAsXML=[<Function file="{{.*}}" line="{{.*}}" column="{{.*}}"><Name>imageTitleAndAlt()</Name><USR>s:14swift_ide_test16imageTitleAndAltyyF</USR><Declaration>func imageTitleAndAlt()</Declaration><Abstract><Para>Brief.</Para></Abstract><Discussion><Para><rawHTML><![CDATA[<img src="/swift.png" title="Image Title" alt="Image Alt"/>]]></rawHTML></Para></Discussion></Function>]
 
-// CHECK: {{.*}}DocCommentAsXML=[<Function file="{{.*}}" line="{{.*}}" column="{{.*}}"><Name>imageAlt()</Name><USR>s:14swift_ide_test8imageAltyyF</USR><Declaration>func imageAlt()</Declaration><Abstract><Para>Brief.</Para></Abstract><Discussion><Para><rawHTML><![CDATA[<img src="/swift.png" alt="Image Alt"\>]]></rawHTML></Para></Discussion></Function>]
+// CHECK: {{.*}}DocCommentAsXML=[<Function file="{{.*}}" line="{{.*}}" column="{{.*}}"><Name>imageAlt()</Name><USR>s:14swift_ide_test8imageAltyyF</USR><Declaration>func imageAlt()</Declaration><Abstract><Para>Brief.</Para></Abstract><Discussion><Para><rawHTML><![CDATA[<img src="/swift.png" alt="Image Alt"/>]]></rawHTML></Para></Discussion></Function>]
 
-// CHECK: {{.*}}DocCommentAsXML=[<Function file="{{.*}}" line="{{.*}}" column="{{.*}}"><Name>imageTitle()</Name><USR>s:14swift_ide_test10imageTitleyyF</USR><Declaration>func imageTitle()</Declaration><Abstract><Para>Brief.</Para></Abstract><Discussion><Para><rawHTML><![CDATA[<img src="/swift.png" title="Image Title" alt="Image Alt"\>]]></rawHTML></Para></Discussion></Function>]
+// CHECK: {{.*}}DocCommentAsXML=[<Function file="{{.*}}" line="{{.*}}" column="{{.*}}"><Name>imageTitle()</Name><USR>s:14swift_ide_test10imageTitleyyF</USR><Declaration>func imageTitle()</Declaration><Abstract><Para>Brief.</Para></Abstract><Discussion><Para><rawHTML><![CDATA[<img src="/swift.png" title="Image Title" alt="Image Alt"/>]]></rawHTML></Para></Discussion></Function>]
 
 // CHECK: {{.*}}DocCommentAsXML=[<Function file="{{.*}}" line="{{.*}}" column="{{.*}}"><Name>urlWithQueryString()</Name><USR>s:14swift_ide_test18urlWithQueryStringyyF</USR><Declaration>func urlWithQueryString()</Declaration><Abstract><Para>Brief.</Para></Abstract><Discussion><Para>Test <Link href="http://apple.com?a=1&amp;b=1&amp;c=abc">a link</Link></Para></Discussion></Function>]
 
-// CHECK: {{.*}}DocCommentAsXML=[<Function file="{{.*}}" line="{{.*}}" column="{{.*}}"><Name>imageWithAmpersandsInTitleAndAlt()</Name><USR>s:14swift_ide_test32imageWithAmpersandsInTitleAndAltyyF</USR><Declaration>func imageWithAmpersandsInTitleAndAlt()</Declaration><Abstract><Para>Brief.</Para></Abstract><Discussion><Para><rawHTML><![CDATA[<img src="http://apple.com" title="&&&" alt="&&&"\>]]></rawHTML></Para></Discussion></Function>]
+// CHECK: {{.*}}DocCommentAsXML=[<Function file="{{.*}}" line="{{.*}}" column="{{.*}}"><Name>imageWithAmpersandsInTitleAndAlt()</Name><USR>s:14swift_ide_test32imageWithAmpersandsInTitleAndAltyyF</USR><Declaration>func imageWithAmpersandsInTitleAndAlt()</Declaration><Abstract><Para>Brief.</Para></Abstract><Discussion><Para><rawHTML><![CDATA[<img src="http://apple.com" title="&&&" alt="&&&"/>]]></rawHTML></Para></Discussion></Function>]

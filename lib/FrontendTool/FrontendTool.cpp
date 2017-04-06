@@ -21,7 +21,9 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/FrontendTool/FrontendTool.h"
+#include "ImportedModules.h"
 #include "ReferenceDependencies.h"
+#include "TBD.h"
 
 #include "swift/Subsystems.h"
 #include "swift/AST/ASTScope.h"
@@ -36,6 +38,7 @@
 #include "swift/Basic/FileSystem.h"
 #include "swift/Basic/LLVMContext.h"
 #include "swift/Basic/SourceManager.h"
+#include "swift/Basic/Statistic.h"
 #include "swift/Basic/Timer.h"
 #include "swift/Frontend/DiagnosticVerifier.h"
 #include "swift/Frontend/Frontend.h"
@@ -115,10 +118,11 @@ static bool emitMakeDependencies(DiagnosticEngine &diags,
     out << escape(targetName) << " :";
     // First include all other files in the module. Make-style dependencies
     // need to be conservative!
-    for (StringRef path : opts.InputFilenames)
+    for (auto const &path : reversePathSortedFilenames(opts.InputFilenames))
       out << ' ' << escape(path);
     // Then print dependencies we've picked up during compilation.
-    for (StringRef path : depTracker.getDependencies())
+    for (auto const &path :
+           reversePathSortedFilenames(depTracker.getDependencies()))
       out << ' ' << escape(path);
     out << '\n';
   });
@@ -322,6 +326,28 @@ static void debugFailWithCrash() {
   LLVM_BUILTIN_TRAP;
 }
 
+static void countStatsPostSILGen(UnifiedStatsReporter &Stats,
+                                 const SILModule& Module) {
+  auto &C = Stats.getFrontendCounters();
+  // FIXME: calculate these in constant time, via the dense maps.
+  C.NumSILGenFunctions = Module.getFunctionList().size();
+  C.NumSILGenVtables = Module.getVTableList().size();
+  C.NumSILGenWitnessTables = Module.getWitnessTableList().size();
+  C.NumSILGenDefaultWitnessTables = Module.getDefaultWitnessTableList().size();
+  C.NumSILGenGlobalVariables = Module.getSILGlobalList().size();
+}
+
+static void countStatsPostSILOpt(UnifiedStatsReporter &Stats,
+                                 const SILModule& Module) {
+  auto &C = Stats.getFrontendCounters();
+  // FIXME: calculate these in constant time, via the dense maps.
+  C.NumSILOptFunctions = Module.getFunctionList().size();
+  C.NumSILOptVtables = Module.getVTableList().size();
+  C.NumSILOptWitnessTables = Module.getWitnessTableList().size();
+  C.NumSILOptDefaultWitnessTables = Module.getDefaultWitnessTableList().size();
+  C.NumSILOptGlobalVariables = Module.getSILGlobalList().size();
+}
+
 /// Performs the compile requested by the user.
 /// \param Instance Will be reset after performIRGeneration when the verifier
 ///                 mode is NoVerify and there were no errors.
@@ -330,7 +356,8 @@ static bool performCompile(std::unique_ptr<CompilerInstance> &Instance,
                            CompilerInvocation &Invocation,
                            ArrayRef<const char *> Args,
                            int &ReturnValue,
-                           FrontendObserver *observer) {
+                           FrontendObserver *observer,
+                           UnifiedStatsReporter *Stats) {
   FrontendOptions opts = Invocation.getFrontendOptions();
   FrontendOptions::ActionType Action = opts.RequestedAction;
 
@@ -340,7 +367,8 @@ static bool performCompile(std::unique_ptr<CompilerInstance> &Instance,
     auto clangImporter = static_cast<ClangImporter *>(
       Instance->getASTContext().getClangModuleLoader());
     return clangImporter->emitBridgingPCH(
-      Invocation.getInputFilenames()[0], opts.getSingleOutputFilename());
+      Invocation.getInputFilenames()[0],
+      opts.getSingleOutputFilename());
   }
 
   IRGenOptions &IRGenOpts = Invocation.getIRGenOptions();
@@ -390,7 +418,8 @@ static bool performCompile(std::unique_ptr<CompilerInstance> &Instance,
 
   if (Action == FrontendOptions::Parse ||
       Action == FrontendOptions::DumpParse ||
-      Action == FrontendOptions::DumpInterfaceHash)
+      Action == FrontendOptions::DumpInterfaceHash ||
+      Action == FrontendOptions::EmitImportedModules)
     Instance->performParseOnly();
   else
     Instance->performSema();
@@ -485,6 +514,9 @@ static bool performCompile(std::unique_ptr<CompilerInstance> &Instance,
     else
       SF->dump();
     return Context.hadError();
+  } else if (Action == FrontendOptions::EmitImportedModules) {
+    emitImportedModules(Context, Instance->getMainModule(), opts);
+    return Context.hadError();
   }
 
   // If we were asked to print Clang stats, do so.
@@ -517,6 +549,10 @@ static bool performCompile(std::unique_ptr<CompilerInstance> &Instance,
     return Context.hadError();
   }
 
+  if (Action == FrontendOptions::EmitTBD) {
+    return writeTBD(Instance->getMainModule(), opts.getSingleOutputFilename());
+  }
+
   assert(Action >= FrontendOptions::EmitSILGen &&
          "All actions not requiring SILGen must have been handled!");
 
@@ -539,6 +575,9 @@ static bool performCompile(std::unique_ptr<CompilerInstance> &Instance,
 
   if (observer) {
     observer->performedSILGeneration(*SM);
+  }
+  if (Stats) {
+    countStatsPostSILGen(*Stats, *SM);
   }
 
   // We've been told to emit SIL after SILGen, so write it now.
@@ -587,8 +626,11 @@ static bool performCompile(std::unique_ptr<CompilerInstance> &Instance,
   if (Invocation.getSILOptions().LinkMode == SILOptions::LinkAll)
     performSILLinking(SM.get(), true);
 
+  if (Invocation.getSILOptions().MergePartialModules)
+    SM->linkAllFromCurrentModule();
+
   {
-    SharedTimer timer("SIL verification (pre-optimization)");
+    SharedTimer timer("SIL verification, pre-optimization");
     SM->verify();
   }
 
@@ -613,9 +655,12 @@ static bool performCompile(std::unique_ptr<CompilerInstance> &Instance,
   if (observer) {
     observer->performedSILOptimization(*SM);
   }
+  if (Stats) {
+    countStatsPostSILOpt(*Stats, *SM);
+  }
 
   {
-    SharedTimer timer("SIL verification (post-optimization)");
+    SharedTimer timer("SIL verification, post-optimization");
     SM->verify();
   }
 
@@ -747,6 +792,14 @@ static bool performCompile(std::unique_ptr<CompilerInstance> &Instance,
   // modules.
   if (!IRModule) {
     return HadError;
+  }
+
+  if (opts.ValidateTBDAgainstIR) {
+    bool validationError =
+        PrimarySourceFile ? validateTBD(PrimarySourceFile, *IRModule)
+                          : validateTBD(Instance->getMainModule(), *IRModule);
+    if (validationError)
+      return true;
   }
 
   std::unique_ptr<llvm::TargetMachine> TargetMachine =
@@ -954,6 +1007,23 @@ int swift::performFrontend(ArrayRef<const char *> Args,
     llvm::EnableStatistics();
   }
 
+  const std::string &StatsOutputDir =
+      Invocation.getFrontendOptions().StatsOutputDir;
+  std::unique_ptr<UnifiedStatsReporter> StatsReporter;
+  if (!StatsOutputDir.empty()) {
+    auto &opts = Invocation.getFrontendOptions();
+    std::string TargetName = opts.ModuleName;
+    if (opts.PrimaryInput.hasValue() &&
+        opts.PrimaryInput.getValue().isFilename()) {
+      auto Index = opts.PrimaryInput.getValue().Index;
+      TargetName += ".";
+      TargetName += llvm::sys::path::filename(opts.InputFilenames[Index]);
+    }
+    StatsReporter = llvm::make_unique<UnifiedStatsReporter>("swift-frontend",
+                                                            TargetName,
+                                                            StatsOutputDir);
+  }
+
   const DiagnosticOptions &diagOpts = Invocation.getDiagnosticOptions();
   if (diagOpts.VerifyMode != DiagnosticOptions::NoVerify) {
     enableDiagnosticVerifier(Instance->getSourceMgr());
@@ -976,10 +1046,11 @@ int swift::performFrontend(ArrayRef<const char *> Args,
 
   int ReturnValue = 0;
   bool HadError =
-    performCompile(Instance, Invocation, Args, ReturnValue, observer);
+    performCompile(Instance, Invocation, Args, ReturnValue, observer,
+                   StatsReporter.get());
 
   if (!HadError) {
-    NewMangling::printManglingStats();
+    Mangle::printManglingStats();
   }
 
   if (!HadError && !Invocation.getFrontendOptions().DumpAPIPath.empty()) {

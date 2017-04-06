@@ -15,7 +15,7 @@
 //===----------------------------------------------------------------------===//
 
 #include "swift/SIL/SILInstruction.h"
-#include "swift/AST/AST.h"
+#include "swift/AST/Expr.h"
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/Basic/type_traits.h"
 #include "swift/Basic/Unicode.h"
@@ -36,8 +36,8 @@ using namespace Lowering;
 // \p openedArchetypes is being used as a set. We don't use a real set type here
 // for performance reasons.
 static void
-collectDependentTypeInfo(Type Ty,
-                         SmallVectorImpl<ArchetypeType *> &openedArchetypes,
+collectDependentTypeInfo(CanType Ty,
+                         SmallVectorImpl<CanArchetypeType> &openedArchetypes,
                          bool &hasDynamicSelf) {
   if (!Ty)
     return;
@@ -45,13 +45,13 @@ collectDependentTypeInfo(Type Ty,
     hasDynamicSelf = true;
   if (!Ty->hasOpenedExistential())
     return;
-  Ty.visit([&](Type t) {
+  Ty.visit([&](CanType t) {
     if (t->isOpenedExistential()) {
       // Add this opened archetype if it was not seen yet.
       // We don't use a set here, because the number of open archetypes
       // is usually very small and using a real set may introduce too
       // much overhead.
-      auto *archetypeTy = t->castTo<ArchetypeType>();
+      auto archetypeTy = cast<ArchetypeType>(t);
       if (std::find(openedArchetypes.begin(), openedArchetypes.end(),
                     archetypeTy) == openedArchetypes.end())
         openedArchetypes.push_back(archetypeTy);
@@ -62,7 +62,7 @@ collectDependentTypeInfo(Type Ty,
 // Takes a set of open archetypes as input and produces a set of
 // references to open archetype definitions.
 static void buildTypeDependentOperands(
-    SmallVectorImpl<ArchetypeType *> &OpenedArchetypes,
+    SmallVectorImpl<CanArchetypeType> &OpenedArchetypes,
     bool hasDynamicSelf,
     SmallVectorImpl<SILValue> &TypeDependentOperands,
     SILOpenedArchetypesState &OpenedArchetypesState, SILFunction &F) {
@@ -88,13 +88,14 @@ static void collectTypeDependentOperands(
                       SmallVectorImpl<SILValue> &TypeDependentOperands,
                       SILOpenedArchetypesState &OpenedArchetypesState,
                       SILFunction &F,
-                      Type Ty,
+                      CanType Ty,
                       SubstitutionList subs = SubstitutionList()) {
-  SmallVector<ArchetypeType *, 4> openedArchetypes;
+  SmallVector<CanArchetypeType, 4> openedArchetypes;
   bool hasDynamicSelf = false;
   collectDependentTypeInfo(Ty, openedArchetypes, hasDynamicSelf);
   for (auto sub : subs) {
-    auto ReplTy = sub.getReplacement();
+    // Substitutions in SIL should really be canonical.
+    auto ReplTy = sub.getReplacement()->getCanonicalType();
     collectDependentTypeInfo(ReplTy, openedArchetypes, hasDynamicSelf);
   }
   buildTypeDependentOperands(openedArchetypes, hasDynamicSelf,
@@ -676,6 +677,26 @@ EndBorrowInst::EndBorrowInst(SILDebugLocation DebugLoc, SILValue Src,
 EndBorrowArgumentInst::EndBorrowArgumentInst(SILDebugLocation DebugLoc,
                                              SILArgument *Arg)
     : UnaryInstructionBase(DebugLoc, SILValue(Arg)) {}
+
+StringRef swift::getSILAccessKindName(SILAccessKind kind) {
+  switch (kind) {
+  case SILAccessKind::Init: return "init";
+  case SILAccessKind::Read: return "read";
+  case SILAccessKind::Modify: return "modify";
+  case SILAccessKind::Deinit: return "deinit";
+  }
+  llvm_unreachable("bad access kind");
+}
+
+StringRef swift::getSILAccessEnforcementName(SILAccessEnforcement enforcement) {
+  switch (enforcement) {
+  case SILAccessEnforcement::Unknown: return "unknown";
+  case SILAccessEnforcement::Static: return "static";
+  case SILAccessEnforcement::Dynamic: return "dynamic";
+  case SILAccessEnforcement::Unsafe: return "unsafe";
+  }
+  llvm_unreachable("bad access enforcement");
+}
 
 AssignInst::AssignInst(SILDebugLocation Loc, SILValue Src, SILValue Dest)
     : SILInstruction(ValueKind::AssignInst, Loc), Operands(this, Src, Dest) {}
@@ -1316,6 +1337,28 @@ SwitchEnumInstBase::SwitchEnumInstBase(
     ::new (succs + NumCases) SILSuccessor(this, DefaultBB);
 }
 
+void SwitchEnumInstBase::swapCase(unsigned i, unsigned j) {
+  assert(i < getNumCases() && "First index is out of bounds?!");
+  assert(j < getNumCases() && "Second index is out of bounds?!");
+
+  auto *succs = getSuccessorBuf();
+
+  // First grab our destination blocks.
+  SILBasicBlock *iBlock = succs[i].getBB();
+  SILBasicBlock *jBlock = succs[j].getBB();
+
+  // Then destroy the sil successors and reinitialize them with the new things
+  // that they are pointing at.
+  succs[i].~SILSuccessor();
+  ::new (succs + i) SILSuccessor(this, jBlock);
+  succs[j].~SILSuccessor();
+  ::new (succs + j) SILSuccessor(this, iBlock);
+
+  // Now swap our cases.
+  auto *cases = getCaseBuf();
+  std::swap(cases[i], cases[j]);
+}
+
 namespace {
   template <class Inst> EnumElementDecl *
   getUniqueCaseForDefaultValue(Inst *inst, SILValue enumValue) {
@@ -1774,7 +1817,8 @@ UnconditionalCheckedCastInst *UnconditionalCheckedCastInst::create(
 }
 
 UnconditionalCheckedCastValueInst *UnconditionalCheckedCastValueInst::create(
-    SILDebugLocation DebugLoc, SILValue Operand, SILType DestTy, SILFunction &F,
+    SILDebugLocation DebugLoc, CastConsumptionKind consumption,
+    SILValue Operand, SILType DestTy, SILFunction &F,
     SILOpenedArchetypesState &OpenedArchetypes) {
   SILModule &Mod = F.getModule();
   SmallVector<SILValue, 8> TypeDependentOperands;
@@ -1785,7 +1829,7 @@ UnconditionalCheckedCastValueInst *UnconditionalCheckedCastValueInst::create(
   void *Buffer =
       Mod.allocateInst(size, alignof(UnconditionalCheckedCastValueInst));
   return ::new (Buffer) UnconditionalCheckedCastValueInst(
-      DebugLoc, Operand, TypeDependentOperands, DestTy);
+      DebugLoc, consumption, Operand, TypeDependentOperands, DestTy);
 }
 
 CheckedCastBranchInst *CheckedCastBranchInst::create(

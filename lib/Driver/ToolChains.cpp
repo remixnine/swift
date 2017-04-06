@@ -123,8 +123,7 @@ static void addCommonFrontendArgs(const ToolChain &TC,
   }
 
   inputArgs.AddAllArgs(arguments, options::OPT_I);
-  inputArgs.AddAllArgs(arguments, options::OPT_F);
-  inputArgs.AddAllArgs(arguments, options::OPT_Fsystem);
+  inputArgs.AddAllArgs(arguments, options::OPT_F, options::OPT_Fsystem);
 
   inputArgs.AddLastArg(arguments, options::OPT_AssertConfig);
   inputArgs.AddLastArg(arguments, options::OPT_autolink_force_load);
@@ -140,6 +139,7 @@ static void addCommonFrontendArgs(const ToolChain &TC,
   inputArgs.AddLastArg(arguments, options::OPT_parse_stdlib);
   inputArgs.AddLastArg(arguments, options::OPT_resource_dir);
   inputArgs.AddLastArg(arguments, options::OPT_solver_memory_threshold);
+  inputArgs.AddLastArg(arguments, options::OPT_warn_swift3_objc_inference);
   inputArgs.AddLastArg(arguments, options::OPT_suppress_warnings);
   inputArgs.AddLastArg(arguments, options::OPT_profile_generate);
   inputArgs.AddLastArg(arguments, options::OPT_profile_coverage_mapping);
@@ -147,6 +147,8 @@ static void addCommonFrontendArgs(const ToolChain &TC,
   inputArgs.AddLastArg(arguments, options::OPT_sanitize_EQ);
   inputArgs.AddLastArg(arguments, options::OPT_sanitize_coverage_EQ);
   inputArgs.AddLastArg(arguments, options::OPT_swift_version);
+  inputArgs.AddLastArg(arguments, options::OPT_enforce_exclusivity_EQ);
+  inputArgs.AddLastArg(arguments, options::OPT_stats_output_dir);
 
   // Pass on any build config options
   inputArgs.AddAllArgs(arguments, options::OPT_D);
@@ -224,6 +226,12 @@ ToolChain::constructInvocation(const CompileJobAction &job,
     case types::TY_SwiftModuleFile:
       // Since this is our primary output, we need to specify the option here.
       FrontendModeOption = "-emit-module";
+      break;
+    case types::TY_ImportedModules:
+      FrontendModeOption = "-emit-imported-modules";
+      break;
+    case types::TY_TBD:
+      FrontendModeOption = "-emit-tbd";
       break;
     case types::TY_Nothing:
       // We were told to output nothing, so get the last mode option and use that.
@@ -492,6 +500,8 @@ ToolChain::constructInvocation(const BackendJobAction &job,
                          "but no mode option was passed to the driver.");
       break;
 
+    case types::TY_ImportedModules:
+    case types::TY_TBD:
     case types::TY_SwiftModuleFile:
     case types::TY_RawSIL:
     case types::TY_RawSIB:
@@ -745,6 +755,26 @@ ToolChain::constructInvocation(const GenerateDSYMJobAction &job,
       context.Args.MakeArgString(context.Output.getPrimaryOutputFilename()));
 
   return {"dsymutil", Arguments};
+}
+
+ToolChain::InvocationInfo
+ToolChain::constructInvocation(const VerifyDebugInfoJobAction &job,
+                               const JobContext &context) const {
+  assert(context.Inputs.size() == 1);
+  assert(context.InputActions.empty());
+
+  // This mirrors the clang driver's --verify-debug-info option.
+  ArgStringList Arguments;
+  Arguments.push_back("--verify");
+  Arguments.push_back("--debug-info");
+  Arguments.push_back("--eh-frame");
+  Arguments.push_back("--quiet");
+
+  StringRef inputPath =
+      context.Inputs.front()->getOutput().getPrimaryOutputFilename();
+  Arguments.push_back(context.Args.MakeArgString(inputPath));
+
+  return {"dwarfdump", Arguments};
 }
 
 ToolChain::InvocationInfo
@@ -1120,8 +1150,11 @@ toolchains::Darwin::constructInvocation(const LinkJobAction &job,
 
   context.Args.AddAllArgValues(Arguments, options::OPT_Xlinker);
   context.Args.AddAllArgs(Arguments, options::OPT_linker_option_Group);
-  context.Args.AddAllArgs(Arguments, options::OPT_F);
-  context.Args.AddAllArgs(Arguments, options::OPT_Fsystem);
+  for (const Arg *arg : context.Args.filtered(options::OPT_F,
+                                              options::OPT_Fsystem)) {
+    Arguments.push_back("-F");
+    Arguments.push_back(arg->getValue());
+  }
 
   if (context.Args.hasArg(options::OPT_enable_app_extension)) {
     // Keep this string fixed in case the option used by the
@@ -1443,8 +1476,14 @@ toolchains::GenericUnix::constructInvocation(const LinkJobAction &job,
 
   context.Args.AddAllArgs(Arguments, options::OPT_Xlinker);
   context.Args.AddAllArgs(Arguments, options::OPT_linker_option_Group);
-  context.Args.AddAllArgs(Arguments, options::OPT_F);
-  context.Args.AddAllArgs(Arguments, options::OPT_Fsystem);
+  for (const Arg *arg : context.Args.filtered(options::OPT_F,
+                                              options::OPT_Fsystem)) {
+    if (arg->getOption().matches(options::OPT_Fsystem))
+      Arguments.push_back("-iframework");
+    else
+      Arguments.push_back(context.Args.MakeArgString(arg->getSpelling()));
+    Arguments.push_back(arg->getValue());
+  }
 
   if (!context.OI.SDKPath.empty()) {
     Arguments.push_back("--sysroot");

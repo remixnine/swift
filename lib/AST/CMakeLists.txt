@@ -33,8 +33,8 @@ add_swift_library(swiftAST STATIC
   Identifier.cpp
   LayoutConstraint.cpp
   LookupVisibleDecls.cpp
-  Mangle.cpp
   Module.cpp
+  ModuleLoader.cpp
   ModuleNameLookup.cpp
   NameLookup.cpp
   Parameter.cpp

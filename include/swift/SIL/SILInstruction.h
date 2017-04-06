@@ -18,9 +18,10 @@
 #define SWIFT_SIL_INSTRUCTION_H
 
 #include "swift/AST/Builtins.h"
-#include "swift/AST/Expr.h"
+#include "swift/AST/Decl.h"
 #include "swift/AST/ProtocolConformanceRef.h"
 #include "swift/Basic/Compiler.h"
+#include "swift/Basic/NullablePtr.h"
 #include "swift/SIL/Consumption.h"
 #include "swift/SIL/SILAllocated.h"
 #include "swift/SIL/SILFunctionConventions.h"
@@ -1831,6 +1832,118 @@ class EndBorrowArgumentInst
   EndBorrowArgumentInst(SILDebugLocation DebugLoc, SILArgument *Arg);
 };
 
+/// Different kinds of access.
+enum class SILAccessKind : uint8_t {
+  /// An access which takes uninitialized memory and initializes it.
+  Init,
+
+  /// An access which reads the value of initialized memory, but doesn't
+  /// modify it.
+  Read,
+
+  /// An access which changes the value of initialized memory.
+  Modify,
+
+  /// An access which takes initialized memory and leaves it uninitialized.
+  Deinit
+};
+StringRef getSILAccessKindName(SILAccessKind kind);
+
+/// Different kinds of exclusivity enforcement for accesses.
+enum class SILAccessEnforcement : uint8_t {
+  /// The access's enforcement has not yet been determined.
+  Unknown,
+
+  /// The access is statically known to not conflict with other accesses.
+  Static,
+
+  /// TODO: maybe add InitiallyStatic for when the access is statically
+  /// known to not interfere with any accesses when it begins but where
+  /// it's possible that other accesses might be started during this access.
+
+  /// The access is not statically known to not conflict with anything
+  /// and must be dynamically checked.
+  Dynamic,
+
+  /// The access is not statically known to not conflict with anything
+  /// but dynamic checking should be suppressed, leaving it undefined
+  /// behavior.
+  Unsafe
+};
+StringRef getSILAccessEnforcementName(SILAccessEnforcement enforcement);
+
+/// Begins an access scope. Must be paired with an end_access instruction
+/// along every path.
+/// 
+class BeginAccessInst
+    : public UnaryInstructionBase<ValueKind::BeginAccessInst> {
+  friend class SILBuilder;
+
+  SILAccessKind AccessKind;
+  SILAccessEnforcement Enforcement;
+
+  BeginAccessInst(SILDebugLocation loc, SILValue lvalue,
+                  SILAccessKind accessKind, SILAccessEnforcement enforcement)
+      : UnaryInstructionBase(loc, lvalue, lvalue->getType()),
+        AccessKind(accessKind), Enforcement(enforcement) {
+
+  }
+
+public:
+  SILAccessKind getAccessKind() const {
+    return AccessKind;
+  }
+  void setAccessKind(SILAccessKind kind) {
+    AccessKind = kind;
+  }
+
+  SILAccessEnforcement getEnforcement() const {
+    return Enforcement;
+  }
+  void setEnforcement(SILAccessEnforcement enforcement) {
+    Enforcement = enforcement;
+  }
+
+  SILValue getSource() const {
+    return getOperand();
+  }
+};
+
+/// Represents the end of an access scope.
+class EndAccessInst : public UnaryInstructionBase<ValueKind::EndAccessInst> {
+  friend class SILBuilder;
+
+  bool Aborting;
+
+private:
+  EndAccessInst(SILDebugLocation loc, SILValue access,
+                bool aborting = false)
+    : UnaryInstructionBase(loc, access), Aborting(aborting) {
+  }
+
+public:
+  /// An aborted access is one that did not perform the expected
+  /// transition described by the begin_access instruction before it
+  /// reached this end_access.
+  ///
+  /// Only AccessKind::Init and AccessKind::Deinit accesses can be
+  /// aborted.
+  bool isAborting() const {
+    return Aborting;
+  }
+  void setAborting(bool aborting) {
+    Aborting = aborting;
+  }
+
+  BeginAccessInst *getBeginAccess() const {
+    return cast<BeginAccessInst>(getOperand());
+  }
+
+  SILValue getSource() const {
+    return getBeginAccess()->getSource();
+  }
+};
+
 /// AssignInst - Represents an abstract assignment to a memory location, which
 /// may either be an initialization or a store sequence.  This is only valid in
 /// Raw SIL.
@@ -2797,6 +2910,19 @@ class UnconditionalCheckedCastInst final
   static UnconditionalCheckedCastInst *
   create(SILDebugLocation DebugLoc, SILValue Operand, SILType DestTy,
          SILFunction &F, SILOpenedArchetypesState &OpenedArchetypes);
+
+public:
+  /// Returns the formal type of the source value.
+  CanType getSourceType() const {
+    // This instruction is only used with types that allow this.
+    return getOperand()->getType().getSwiftRValueType();
+  }
+
+  /// Returns the formal target type.
+  CanType getTargetType() const {
+    // This instruction is only used with types that allow this.
+    return getType().getSwiftRValueType();
+  }
 };
 
 /// Perform an unconditional checked cast that aborts if the cast fails.
@@ -2848,16 +2974,24 @@ class UnconditionalCheckedCastValueInst final
           ValueKind::UnconditionalCheckedCastValueInst,
           UnconditionalCheckedCastValueInst, ConversionInst, true> {
   friend SILBuilder;
+  CastConsumptionKind ConsumptionKind;
 
-  UnconditionalCheckedCastValueInst(SILDebugLocation DebugLoc, SILValue Operand,
+  UnconditionalCheckedCastValueInst(SILDebugLocation DebugLoc,
+                                    CastConsumptionKind consumption,
+                                    SILValue Operand,
                                     ArrayRef<SILValue> TypeDependentOperands,
                                     SILType DestTy)
       : UnaryInstructionWithTypeDependentOperandsBase(
-            DebugLoc, Operand, TypeDependentOperands, DestTy) {}
+            DebugLoc, Operand, TypeDependentOperands, DestTy),
+        ConsumptionKind(consumption) {}
 
   static UnconditionalCheckedCastValueInst *
-  create(SILDebugLocation DebugLoc, SILValue Operand, SILType DestTy,
-         SILFunction &F, SILOpenedArchetypesState &OpenedArchetypes);
+  create(SILDebugLocation DebugLoc, CastConsumptionKind consumption,
+         SILValue Operand, SILType DestTy, SILFunction &F,
+         SILOpenedArchetypesState &OpenedArchetypes);
+
+public:
+  CastConsumptionKind getConsumptionKind() const { return ConsumptionKind; }
 };
 
 /// StructInst - Represents a constructed loadable struct.
@@ -4367,7 +4501,7 @@ class EndLifetimeInst
 /// An unsafe conversion in between ownership kinds.
 ///
 /// This is used today in destructors where due to objective-c legacy
-/// constraints, we need to be able to convert a guaranteed paramter to an owned
+/// constraints, we need to be able to convert a guaranteed parameter to an owned
 /// parameter.
 class UncheckedOwnershipConversionInst
     : public UnaryInstructionBase<ValueKind::UncheckedOwnershipConversionInst> {
@@ -5189,6 +5323,9 @@ public:
     return {getCaseBuf()[i], getSuccessorBuf()[i].getBB()};
   }
 
+  // Swap the cases at indices \p i and \p j.
+  void swapCase(unsigned i, unsigned j);
+
   /// \brief Return the block that will be branched to on the specified enum
   /// case.
   SILBasicBlock *getCaseDestination(EnumElementDecl *D) {
@@ -5355,6 +5492,18 @@ public:
     return DestBBs;
   }
 
+  /// Returns the formal type of the source value.
+  CanType getSourceType() const {
+    // This instruction is only used with types that allow this.
+    return getOperand()->getType().getSwiftRValueType();
+  }
+
+  /// Returns the formal target type.
+  CanType getTargetType() const {
+    // This instruction is only used with types that allow this.
+    return getCastType().getSwiftRValueType();
+  }
+
   SILType getCastType() const { return DestTy; }
 
   SILBasicBlock *getSuccessBB() { return DestBBs[0]; }
@@ -5395,6 +5544,18 @@ class CheckedCastValueBranchInst final
 
 public:
   SuccessorListTy getSuccessors() { return DestBBs; }
+
+  /// Returns the formal type of the source value.
+  CanType getSourceType() const {
+    // This instruction is only used with types that allow this.
+    return getOperand()->getType().getSwiftRValueType();
+  }
+
+  /// Returns the formal target type.
+  CanType getTargetType() const {
+    // This instruction is only used with types that allow this.
+    return getCastType().getSwiftRValueType();
+  }
 
   SILType getCastType() const { return DestTy; }
 

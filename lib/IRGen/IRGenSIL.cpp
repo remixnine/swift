@@ -44,6 +44,7 @@
 #include "swift/SIL/SILModule.h"
 #include "swift/SIL/SILType.h"
 #include "swift/SIL/SILVisitor.h"
+#include "swift/SIL/InstructionUtils.h"
 #include "clang/CodeGen/CodeGenABITypes.h"
 
 #include "CallEmission.h"
@@ -358,7 +359,10 @@ public:
   /// Keeps track of the mapping of source variables to -O0 shadow copy allocas.
   llvm::SmallDenseMap<StackSlotKey, Address, 8> ShadowStackSlots;
   llvm::SmallDenseMap<Decl *, SmallString<4>, 8> AnonymousVariables;
-  llvm::SmallDenseMap<llvm::Instruction *, DominancePoint, 8> ValueVariables;
+  /// To avoid inserting elements into ValueDomPoints twice.
+  llvm::SmallDenseSet<llvm::Instruction *, 8> ValueVariables;
+  /// Holds the DominancePoint of values that are storage for a source variable.
+  SmallVector<std::pair<llvm::Instruction *, DominancePoint>, 8> ValueDomPoints;
   unsigned NumAnonVars = 0;
   unsigned NumCondFails = 0;
 
@@ -582,7 +586,7 @@ public:
   void emitDebugVariableRangeExtension(const SILBasicBlock *CurBB) {
     if (IGM.IRGen.Opts.Optimize)
       return;
-    for (auto &Variable : ValueVariables) {
+    for (auto &Variable : ValueDomPoints) {
       auto VarDominancePoint = Variable.second;
       llvm::Value *Storage = Variable.first;
       if (getActiveDominancePoint() == VarDominancePoint ||
@@ -670,7 +674,8 @@ public:
       if (!needsShadowCopy(Storage)) {
         // Mark for debug value range extension unless this is a constant.
         if (auto *Value = dyn_cast<llvm::Instruction>(Storage))
-          ValueVariables.insert({Value, getActiveDominancePoint()});
+          if (ValueVariables.insert(Value).second)
+            ValueDomPoints.push_back({Value, getActiveDominancePoint()});
         return Storage;
       }
 
@@ -763,8 +768,8 @@ public:
     auto runtimeTy = getRuntimeReifiedType(IGM,
                                            Ty.getType()->getCanonicalType());
     if (!IGM.IRGen.Opts.Optimize && runtimeTy->hasArchetype())
-      runtimeTy.visit([&](Type t) {
-        if (auto archetype = dyn_cast<ArchetypeType>(CanType(t)))
+      runtimeTy.visit([&](CanType t) {
+        if (auto archetype = dyn_cast<ArchetypeType>(t))
           emitTypeMetadataRef(archetype);
        });
 
@@ -917,6 +922,8 @@ public:
   void visitStoreBorrowInst(StoreBorrowInst *i) {
     llvm_unreachable("unimplemented");
   }
+  void visitBeginAccessInst(BeginAccessInst *i);
+  void visitEndAccessInst(EndAccessInst *i);
   void visitUnmanagedRetainValueInst(UnmanagedRetainValueInst *i) {
     llvm_unreachable("unimplemented");
   }
@@ -1589,10 +1596,6 @@ void IRGenSILFunction::visitSILBasicBlock(SILBasicBlock *BB) {
 
   for (auto InsnIter = BB->begin(); InsnIter != BB->end(); ++InsnIter) {
     auto &I = *InsnIter;
-#ifndef NDEBUG
-    IGM.EligibleConfs.collect(&I);
-    IGM.CurrentInst = &I;
-#endif
     if (IGM.DebugInfo) {
       // Set the debug info location for I, if applicable.
       SILLocation ILoc = I.getLoc();
@@ -1647,10 +1650,6 @@ void IRGenSILFunction::visitSILBasicBlock(SILBasicBlock *BB) {
     }
     visit(&I);
 
-#ifndef NDEBUG
-    IGM.EligibleConfs.clear();
-    IGM.CurrentInst = nullptr;
-#endif
   }
   
   assert(Builder.hasPostTerminatorIP() && "SIL bb did not terminate block?!");
@@ -1684,7 +1683,11 @@ void IRGenSILFunction::visitAllocGlobalInst(AllocGlobalInst *i) {
   // buffer.
   Address addr = IGM.getAddrOfSILGlobalVariable(var, ti,
                                                 NotForDefinition);
-  (void) ti.allocateBuffer(*this, addr, loweredTy);
+  if (getSILModule().getOptions().UseCOWExistentials) {
+    emitAllocateValueInBuffer(*this, loweredTy, addr);
+  } else {
+    (void) ti.allocateBuffer(*this, addr, loweredTy);
+  }
 }
 
 void IRGenSILFunction::visitGlobalAddrInst(GlobalAddrInst *i) {
@@ -1714,7 +1717,11 @@ void IRGenSILFunction::visitGlobalAddrInst(GlobalAddrInst *i) {
 
   // Otherwise, the static storage for the global consists of a fixed-size
   // buffer; project it.
-  addr = ti.projectBuffer(*this, addr, loweredTy);
+  if (getSILModule().getOptions().UseCOWExistentials) {
+    addr = emitProjectValueInBuffer(*this, loweredTy, addr);
+  } else {
+    addr = ti.projectBuffer(*this, addr, loweredTy);
+  }
   
   setLoweredAddress(i, addr);
 }
@@ -3267,8 +3274,9 @@ void IRGenSILFunction::emitErrorResultVar(SILResultInfo ErrorInfo,
   SILDebugVariable Var = DbgValue->getVarInfo();
   auto Storage = emitShadowCopy(ErrorResultSlot.getAddress(), getDebugScope(),
                                 Var.Name, Var.ArgNo);
-  DebugTypeInfo DTI(nullptr, ErrorInfo.getType(), ErrorResultSlot->getType(),
-                    IGM.getPointerSize(), IGM.getPointerAlignment());
+  DebugTypeInfo DTI(nullptr, nullptr, ErrorInfo.getType(),
+                    ErrorResultSlot->getType(), IGM.getPointerSize(),
+                    IGM.getPointerAlignment());
   IGM.DebugInfo->emitVariableDeclaration(Builder, Storage, DTI, getDebugScope(),
                                          nullptr, Var.Name, Var.ArgNo,
                                          IndirectValue, ArtificialValue);
@@ -3296,13 +3304,14 @@ void IRGenSILFunction::visitDebugValueInst(DebugValueInst *i) {
   auto RealTy = SILVal->getType().getSwiftRValueType();
   if (VarDecl *Decl = i->getDecl()) {
     DbgTy = DebugTypeInfo::getLocalVariable(
-        CurSILFn->getDeclContext(), Decl, RealTy,
-        getTypeInfo(SILVal->getType()), /*Unwrap=*/false);
+        CurSILFn->getDeclContext(), CurSILFn->getGenericEnvironment(), Decl,
+        RealTy, getTypeInfo(SILVal->getType()), /*Unwrap=*/false);
   } else if (i->getFunction()->isBare() &&
              !SILTy.hasArchetype() && !Name.empty()) {
     // Preliminary support for .sil debug information.
-    DbgTy = DebugTypeInfo::getFromTypeInfo(CurSILFn->getDeclContext(), RealTy,
-                                           getTypeInfo(SILTy));
+    DbgTy = DebugTypeInfo::getFromTypeInfo(CurSILFn->getDeclContext(),
+                                           CurSILFn->getGenericEnvironment(),
+                                           RealTy, getTypeInfo(SILTy));
   } else
     return;
 
@@ -3342,8 +3351,8 @@ void IRGenSILFunction::visitDebugValueAddrInst(DebugValueAddrInst *i) {
       i->getVarInfo().Constant ||
       SILTy.is<ArchetypeType>();
   auto DbgTy = DebugTypeInfo::getLocalVariable(
-      CurSILFn->getDeclContext(), Decl, RealType,
-      getTypeInfo(SILVal->getType()), Unwrap);
+      CurSILFn->getDeclContext(), CurSILFn->getGenericEnvironment(), Decl,
+      RealType, getTypeInfo(SILVal->getType()), Unwrap);
   // Put the value's address into a stack slot at -Onone and emit a debug
   // intrinsic.
   unsigned ArgNo = i->getVarInfo().ArgNo;
@@ -3616,8 +3625,9 @@ void IRGenSILFunction::emitDebugInfoForAllocStack(AllocStackInst *i,
 
     SILType SILTy = i->getType();
     auto RealType = SILTy.getSwiftRValueType();
-    auto DbgTy = DebugTypeInfo::getLocalVariable(CurSILFn->getDeclContext(),
-                                                 Decl, RealType, type, false);
+    auto DbgTy = DebugTypeInfo::getLocalVariable(
+        CurSILFn->getDeclContext(), CurSILFn->getGenericEnvironment(), Decl,
+        RealType, type, false);
     StringRef Name = getVarName(i);
     if (auto DS = i->getDebugScope())
       emitDebugVariableDeclaration(addr, DbgTy, SILTy, DS, Decl, Name,
@@ -3803,7 +3813,7 @@ void IRGenSILFunction::visitAllocBoxInst(swift::AllocBoxInst *i) {
     if (SILTy.isAddress())
       RealType = CanInOutType::get(RealType);
     auto DbgTy = DebugTypeInfo::getLocalVariable(
-        CurSILFn->getDeclContext(), Decl,
+        CurSILFn->getDeclContext(), CurSILFn->getGenericEnvironment(), Decl,
         RealType, type, /*Unwrap=*/false);
 
     if (isInlinedGeneric(Decl, i->getDebugScope()))
@@ -3831,6 +3841,51 @@ void IRGenSILFunction::visitProjectBoxInst(swift::ProjectBoxInst *i) {
     auto addr = emitProjectBox(*this, box.claimNext(), boxTy);
     setLoweredAddress(i, addr);
   }
+}
+
+static void emitBeginAccess(IRGenSILFunction &IGF, BeginAccessInst *access,
+                            Address addr) {
+  switch (access->getEnforcement()) {
+  case SILAccessEnforcement::Unknown:
+    llvm_unreachable("unknown access enforcement in IRGen!");
+
+  case SILAccessEnforcement::Static:
+  case SILAccessEnforcement::Unsafe:
+    // nothing to do
+    return;
+
+  case SILAccessEnforcement::Dynamic:
+    // TODO
+    return;
+  }
+  llvm_unreachable("bad access enforcement");
+}
+
+static void emitEndAccess(IRGenSILFunction &IGF, BeginAccessInst *access) {
+  switch (access->getEnforcement()) {
+  case SILAccessEnforcement::Unknown:
+    llvm_unreachable("unknown access enforcement in IRGen!");
+
+  case SILAccessEnforcement::Static:
+  case SILAccessEnforcement::Unsafe:
+    // nothing to do
+    return;
+
+  case SILAccessEnforcement::Dynamic:
+    // TODO
+    return;
+  }
+  llvm_unreachable("bad access enforcement");
+}
+
+void IRGenSILFunction::visitBeginAccessInst(BeginAccessInst *i) {
+  Address addr = getLoweredAddress(i->getOperand());
+  emitBeginAccess(*this, i, addr);
+  setLoweredAddress(i, addr);
+}
+
+void IRGenSILFunction::visitEndAccessInst(EndAccessInst *i) {
+  emitEndAccess(*this, i->getBeginAccess());
 }
 
 void IRGenSILFunction::visitConvertFunctionInst(swift::ConvertFunctionInst *i) {
@@ -4453,8 +4508,12 @@ void IRGenSILFunction::visitAllocValueBufferInst(
                                           swift::AllocValueBufferInst *i) {
   Address buffer = getLoweredAddress(i->getOperand());
   auto valueType = i->getValueType();
-  Address value =
-    getTypeInfo(valueType).allocateBuffer(*this, buffer, valueType);
+  Address value;
+  if (getSILModule().getOptions().UseCOWExistentials) {
+    value = emitAllocateValueInBuffer(*this, valueType, buffer);
+  } else {
+    value = getTypeInfo(valueType).allocateBuffer(*this, buffer, valueType);
+  }
   setLoweredAddress(i, value);
 }
 
@@ -4462,8 +4521,12 @@ void IRGenSILFunction::visitProjectValueBufferInst(
                                           swift::ProjectValueBufferInst *i) {
   Address buffer = getLoweredAddress(i->getOperand());
   auto valueType = i->getValueType();
-  Address value =
-    getTypeInfo(valueType).projectBuffer(*this, buffer, valueType);
+  Address value;
+  if (getSILModule().getOptions().UseCOWExistentials) {
+    value = emitProjectValueInBuffer(*this, valueType, buffer);
+  } else {
+    value = getTypeInfo(valueType).projectBuffer(*this, buffer, valueType);
+  }
   setLoweredAddress(i, value);
 }
 
@@ -4471,6 +4534,10 @@ void IRGenSILFunction::visitDeallocValueBufferInst(
                                           swift::DeallocValueBufferInst *i) {
   Address buffer = getLoweredAddress(i->getOperand());
   auto valueType = i->getValueType();
+  if (getSILModule().getOptions().UseCOWExistentials) {
+    emitDeallocateValueInBuffer(*this, valueType, buffer);
+    return;
+  }
   getTypeInfo(valueType).deallocateBuffer(*this, buffer, valueType);
 }
 
@@ -4486,7 +4553,7 @@ void IRGenSILFunction::visitInitExistentialAddrInst(swift::InitExistentialAddrIn
   auto srcType = i->getLoweredConcreteType();
   auto &srcTI = getTypeInfo(srcType);
 
-  // Allocate a COW box for the value if neceesary.
+  // Allocate a COW box for the value if necessary.
   if (getSILModule().getOptions().UseCOWExistentials) {
     auto *genericEnv = CurSILFn->getGenericEnvironment();
     setLoweredAddress(i, emitAllocateBoxedOpaqueExistentialBuffer(
@@ -4536,7 +4603,7 @@ void IRGenSILFunction::visitDeinitExistentialAddrInst(
                                               swift::DeinitExistentialAddrInst *i) {
   Address container = getLoweredAddress(i->getOperand());
 
-  // Deallocate the COW box for the value if neceesary.
+  // Deallocate the COW box for the value if necessary.
   if (getSILModule().getOptions().UseCOWExistentials) {
     emitDeallocateBoxedOpaqueExistentialBuffer(
         *this, i->getOperand()->getType(), container);

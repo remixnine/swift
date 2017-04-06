@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -Xllvm -new-mangling-for-tests -Xllvm -sil-full-demangle %s -emit-silgen | %FileCheck %s
+// RUN: %target-swift-frontend -Xllvm -sil-full-demangle %s -emit-silgen | %FileCheck %s
 
 protocol P {
   associatedtype Assoc1
@@ -194,14 +194,14 @@ struct GenericTypeContext<T>: GenericWitnessTest {
   typealias Tee = T
 
   var a: T
-  // CHECK-LABEL: sil shared @_T023interface_type_mangling18GenericTypeContextV09closureIndF0yqd__lF3fooL_yx_qd__tr__lF
+  // CHECK-LABEL: sil private @_T023interface_type_mangling18GenericTypeContextV09closureIndF0yqd__lF3fooL_yx_qd__tr__lF
   func closureInGenericContext<U>(_ b: U) {
     func foo(_ x: T, _ y: U) { }
 
     foo(a, b)
   }
 
-  // CHECK-LABEL: sil shared @_T023interface_type_mangling18GenericTypeContextV09closureInd8PropertyF0xfg3fooL_xylF
+  // CHECK-LABEL: sil private @_T023interface_type_mangling18GenericTypeContextV09closureInd8PropertyF0xfg3fooL_xylF
   var closureInGenericPropertyContext: T {
     func foo() -> T { }
 

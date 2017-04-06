@@ -161,11 +161,9 @@
 #include "RValue.h"
 #include "Scope.h"
 #include "Initialization.h"
-#include "swift/AST/AST.h"
 #include "swift/AST/Decl.h"
 #include "swift/AST/Types.h"
 #include "swift/AST/GenericEnvironment.h"
-#include "swift/AST/Mangle.h"
 #include "swift/AST/ASTMangler.h"
 #include "swift/AST/ProtocolConformance.h"
 #include "swift/AST/SubstitutionMap.h"
@@ -195,29 +193,20 @@ getMaterializeForSetCallbackName(ProtocolConformance *conformance,
   closure.setType(TupleType::getEmpty(dc->getASTContext()));
   closure.getCaptureInfo().setGenericParamCaptures(true);
 
-  Mangle::Mangler mangler;
-  NewMangling::ASTMangler NewMangler;
+  Mangle::ASTMangler Mangler;
   std::string New;
   if (conformance) {
     // Concrete witness thunk for a conformance:
     //
     // Mangle this as if it were a conformance thunk for a closure
     // within the requirement.
-    mangler.append("_TTW");
-    mangler.mangleProtocolConformance(conformance);
-    New = NewMangler.mangleClosureWitnessThunk(conformance, &closure);
-  } else {
-    // Default witness thunk or concrete implementation:
-    //
-    // Mangle this as if it were a closure within the requirement.
-    mangler.append("_T");
-    New = NewMangler.mangleClosureEntity(&closure,
-                                NewMangling::ASTMangler::SymbolKind::Default);
+    return Mangler.mangleClosureWitnessThunk(conformance, &closure);
   }
-  mangler.mangleClosureEntity(&closure, /*uncurryingLevel=*/1);
-  std::string Old = mangler.finalize();
-
-  return NewMangling::selectMangling(Old, New);
+  // Default witness thunk or concrete implementation:
+  //
+  // Mangle this as if it were a closure within the requirement.
+  return Mangler.mangleClosureEntity(&closure,
+                                 Mangle::ASTMangler::SymbolKind::Default);
 }
 
 /// A helper class for emitting materializeForSet.
@@ -370,7 +359,7 @@ public:
          emitter.WitnessStorage->hasAddressors()))
       emitter.TheAccessSemantics = AccessSemantics::DirectToStorage;
     else if (emitter.WitnessStorage->hasClangNode() ||
-             emitter.WitnessStorage->getAttrs().hasAttribute<NSManagedAttr>())
+             emitter.WitnessStorage->isDynamic())
       emitter.TheAccessSemantics = AccessSemantics::Ordinary;
     else
       emitter.TheAccessSemantics = AccessSemantics::DirectToAccessor;
@@ -444,12 +433,13 @@ public:
       else {
         if (!self.isLValue())
           self = ManagedValue::forLValue(self.getValue());
-        return LValue::forAddress(self, selfPattern, SubstSelfType);
+        return LValue::forAddress(self, None, selfPattern, SubstSelfType);
       }
     }
 
     CanType witnessSelfType =
-      Witness->computeInterfaceSelfType()->getCanonicalType();
+      Witness->computeInterfaceSelfType()->getCanonicalType(
+        GenericSig, *SGM.M.getSwiftModule());
     witnessSelfType = getSubstWitnessInterfaceType(witnessSelfType);
     witnessSelfType = witnessSelfType->getInOutObjectType()
       ->getCanonicalType();
@@ -657,7 +647,9 @@ collectIndicesFromParameters(SILGenFunction &gen, SILLocation loc,
                              ArrayRef<ManagedValue> sourceIndices) {
   auto witnessSubscript = cast<SubscriptDecl>(WitnessStorage);
   CanType witnessIndicesType =
-    witnessSubscript->getIndicesInterfaceType()->getCanonicalType();
+    witnessSubscript->getIndicesInterfaceType()
+      ->getCanonicalType(GenericSig,
+                         *SGM.M.getSwiftModule());
   CanType substIndicesType =
     getSubstWitnessInterfaceType(witnessIndicesType);
 
@@ -690,7 +682,7 @@ SILFunction *MaterializeForSetEmitter::createCallback(SILFunction &F,
   auto callback =
     SGM.M.createFunction(Linkage, CallbackName, callbackType,
                          genericEnv, SILLocation(Witness),
-                         IsBare, F.isTransparent(), F.isFragile(),
+                         IsBare, F.isTransparent(), F.isSerialized(),
                          IsNotThunk,
                          /*classVisibility=*/SILFunction::NotRelevant,
                          /*inlineStrategy=*/InlineDefault,
@@ -720,7 +712,7 @@ SILFunction *MaterializeForSetEmitter::createCallback(SILFunction &F,
 
     // Call the generator function we were provided.
     {
-      LexicalScope scope(gen.Cleanups, gen, CleanupLocation::get(loc));
+      LexicalScope scope(gen, CleanupLocation::get(loc));
       generator(gen, loc, valueBuffer, storageBuffer, self);
     }
 
