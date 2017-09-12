@@ -192,6 +192,48 @@ protected:
 
   }
   
+  /// Marks the declarations referenced by a key path pattern as alive if they
+  /// aren't yet.
+  void ensureKeyPathComponentsAreAlive(KeyPathPattern *KP) {
+    for (auto &component : KP->getComponents()) {
+      switch (component.getKind()) {
+      case KeyPathPatternComponent::Kind::SettableProperty:
+        ensureAlive(component.getComputedPropertySetter());
+        LLVM_FALLTHROUGH;
+      case KeyPathPatternComponent::Kind::GettableProperty: {
+        ensureAlive(component.getComputedPropertyGetter());
+        auto id = component.getComputedPropertyId();
+        switch (id.getKind()) {
+        case KeyPathPatternComponent::ComputedPropertyId::DeclRef: {
+          auto decl = cast<AbstractFunctionDecl>(id.getDeclRef().getDecl());
+          if (auto clas = dyn_cast<ClassDecl>(decl->getDeclContext())) {
+            ensureAliveClassMethod(getMethodInfo(decl, /*witness*/ false),
+                                   dyn_cast<FuncDecl>(decl),
+                                   clas);
+          } else if (isa<ProtocolDecl>(decl->getDeclContext())) {
+            ensureAliveProtocolMethod(getMethodInfo(decl, /*witness*/ true));
+          } else {
+            llvm_unreachable("key path keyed by a non-class, non-protocol method");
+          }
+          break;
+        }
+        case KeyPathPatternComponent::ComputedPropertyId::Function:
+          ensureAlive(id.getFunction());
+          break;
+        case KeyPathPatternComponent::ComputedPropertyId::Property:
+          break;
+        }
+        continue;
+      }
+      case KeyPathPatternComponent::Kind::StoredProperty:
+      case KeyPathPatternComponent::Kind::OptionalChain:
+      case KeyPathPatternComponent::Kind::OptionalForce:
+      case KeyPathPatternComponent::Kind::OptionalWrap:            
+        continue;
+      }
+    }
+  }
+  
   /// Marks a function as alive if it is not alive yet.
   void ensureAlive(SILFunction *F) {
     if (!isAlive(F))
@@ -313,6 +355,8 @@ protected:
           ensureAliveClassMethod(mi, dyn_cast<FuncDecl>(funcDecl), MethodCl);
         } else if (auto *FRI = dyn_cast<FunctionRefInst>(&I)) {
           ensureAlive(FRI->getReferencedFunction());
+        } else if (auto *KPI = dyn_cast<KeyPathInst>(&I)) {
+          ensureKeyPathComponentsAreAlive(KPI->getPattern());
         }
       }
     }
@@ -320,18 +364,18 @@ protected:
 
   /// Retrieve the visibility information from the AST.
   bool isVisibleExternally(const ValueDecl *decl) {
-    Accessibility accessibility = decl->getEffectiveAccess();
+    AccessLevel access = decl->getEffectiveAccess();
     SILLinkage linkage;
-    switch (accessibility) {
-    case Accessibility::Private:
-    case Accessibility::FilePrivate:
+    switch (access) {
+    case AccessLevel::Private:
+    case AccessLevel::FilePrivate:
       linkage = SILLinkage::Private;
       break;
-    case Accessibility::Internal:
+    case AccessLevel::Internal:
       linkage = SILLinkage::Hidden;
       break;
-    case Accessibility::Public:
-    case Accessibility::Open:
+    case AccessLevel::Public:
+    case AccessLevel::Open:
       linkage = SILLinkage::Public;
       break;
     }
@@ -365,12 +409,6 @@ protected:
       if (!F.shouldOptimize()) {
         DEBUG(llvm::dbgs() << "  anchor a no optimization function: " << F.getName() << "\n");
         ensureAlive(&F);
-      }
-    }
-
-    for (SILGlobalVariable &G : Module->getSILGlobalList()) {
-      if (SILFunction *initFunc = G.getInitializer()) {
-        ensureAlive(initFunc);
       }
     }
   }
@@ -488,7 +526,7 @@ class DeadFunctionElimination : FunctionLivenessComputation {
         if (// A conservative approach: if any of the overridden functions is
             // visible externally, we mark the whole method as alive.
             isPossiblyUsedExternally(entry.Linkage, Module->isWholeModule())
-            // We also have to check the method declaration's accessibility.
+            // We also have to check the method declaration's access level.
             // Needed if it's a public base method declared in another
             // compilation unit (for this we have no SILFunction).
             || isVisibleExternally(fd)
@@ -844,7 +882,6 @@ class SILDeadFuncElimination : public SILModuleTransform {
     deadFunctionElimination.eliminateFunctions(this);
   }
   
-  StringRef getName() override { return "Dead Function Elimination"; }
 };
 
 class SILExternalFuncDefinitionsElimination : public SILModuleTransform {
@@ -862,9 +899,6 @@ class SILExternalFuncDefinitionsElimination : public SILModuleTransform {
     EFDFE.eliminateFunctions(this);
  }
 
-  StringRef getName() override {
-    return "External Function Definitions Elimination";
-  }
 };
 
 } // end anonymous namespace

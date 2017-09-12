@@ -96,19 +96,6 @@ class SILFunction
 public:
   typedef llvm::iplist<SILBasicBlock> BlockListType;
 
-  /// The visibility of this method's class (if any).
-  enum ClassVisibility_t {
-    
-    /// This is a method in the vtable of a public class.
-    PublicClass,
-    
-    /// This is a method in the vtable of an internal class.
-    InternalClass,
-    
-    /// All other cases (e.g. this function is not a method).
-    NotRelevant
-  };
-    
 private:
   friend class SILBasicBlock;
   friend class SILModule;
@@ -125,6 +112,10 @@ private:
 
   /// The context archetypes of the function.
   GenericEnvironment *GenericEnv;
+
+  /// The information about specialization.
+  /// Only set if this function is a specialization of another function.
+  const GenericSpecializationInformation *SpecializationInfo;
 
   /// The forwarding substitutions, lazily computed.
   Optional<SubstitutionList> ForwardingSubs;
@@ -155,10 +146,10 @@ private:
   /// functions into the thunk.
   unsigned Thunk : 2;
 
-  /// The visibility of the parent class, if this is a method which is contained
-  /// in the vtable of that class.
-  unsigned ClassVisibility : 2;
-    
+  /// The scope in which the parent class can be subclassed, if this is a method
+  /// which is contained in the vtable of that class.
+  unsigned ClassSubclassScope : 2;
+
   /// The function's global_init attribute.
   unsigned GlobalInitFlag : 1;
 
@@ -199,6 +190,7 @@ private:
   /// *) It is inlined and the debug info keeps a reference to the function.
   /// *) It is a dead method of a class which has higher visibility than the
   ///    method itself. In this case we need to create a vtable stub for it.
+  /// *) It is a function referenced by the specialization information.
   bool Zombie = false;
 
   /// True if SILOwnership is enabled for this function.
@@ -212,7 +204,7 @@ private:
               CanSILFunctionType loweredType, GenericEnvironment *genericEnv,
               Optional<SILLocation> loc, IsBare_t isBareSILFunction,
               IsTransparent_t isTrans, IsSerialized_t isSerialized,
-              IsThunk_t isThunk, ClassVisibility_t classVisibility,
+              IsThunk_t isThunk, SubclassScope classSubclassScope,
               Inline_t inlineStrategy, EffectsKind E,
               SILFunction *insertBefore,
               const SILDebugScope *debugScope);
@@ -223,7 +215,7 @@ private:
          Optional<SILLocation> loc, IsBare_t isBareSILFunction,
          IsTransparent_t isTrans, IsSerialized_t isSerialized,
          IsThunk_t isThunk = IsNotThunk,
-         ClassVisibility_t classVisibility = NotRelevant,
+         SubclassScope classSubclassScope = SubclassScope::NotApplicable,
          Inline_t inlineStrategy = InlineDefault,
          EffectsKind EffectsKindAttr = EffectsKind::Unspecified,
          SILFunction *InsertBefore = nullptr,
@@ -252,9 +244,9 @@ public:
   /// or return instructions; you need to do that yourself
   /// if you care.
   ///
-  /// This is a hack and should be removed!
+  /// This routine does not update all the references in the module
+  /// You have to do that yourself
   void rewriteLoweredTypeUnsafe(CanSILFunctionType newType) {
-    assert(canBeDeleted());
     LoweredType = newType;
   }
 
@@ -299,11 +291,10 @@ public:
   /// Mark this function as removed from the module's function list, but kept
   /// as "zombie" for debug info or vtable stub generation.
   void setZombie() {
-    assert((isInlined() || isExternallyUsedSymbol())  &&
-          "Function should be deleted instead of getting a zombie");
+    assert(!isZombie() && "Function is a zombie function already");
     Zombie = true;
   }
-  
+
   /// Returns true if this function is dead, but kept in the module's zombie list.
   bool isZombie() const { return Zombie; }
 
@@ -393,22 +384,8 @@ public:
   /// method itself, the function can be referenced from vtables of derived
   /// classes in other compilation units.
   SILLinkage getEffectiveSymbolLinkage() const {
-    SILLinkage L = getLinkage();
-    switch (getClassVisibility()) {
-      case NotRelevant:
-        break;
-      case InternalClass:
-        if (L == SILLinkage::Private)
-          return SILLinkage::Hidden;
-        break;
-      case PublicClass:
-        if (L == SILLinkage::Private || L == SILLinkage::Hidden)
-          return SILLinkage::Public;
-        if (L == SILLinkage::PrivateExternal || L == SILLinkage::HiddenExternal)
-          return SILLinkage::PublicExternal;
-        break;
-    }
-    return L;
+    return effectiveLinkageForClassMember(getLinkage(),
+                                          getClassSubclassScope());
   }
     
   /// Helper method which returns true if this function has "external" linkage.
@@ -483,6 +460,10 @@ public:
   ///          or is raw SIL (so that the mandatory passes still run).
   bool shouldOptimize() const;
 
+  /// Returns true if this is a function that should have its ownership
+  /// verified.
+  bool shouldVerifyOwnership() const;
+
   /// Check if the function has a location.
   /// FIXME: All functions should have locations, so this method should not be
   /// necessary.
@@ -519,8 +500,8 @@ public:
   void setThunk(IsThunk_t isThunk) { Thunk = isThunk; }
 
   /// Get the class visibility (relevant for class methods).
-  ClassVisibility_t getClassVisibility() const {
-    return ClassVisibility_t(ClassVisibility);
+  SubclassScope getClassSubclassScope() const {
+    return SubclassScope(ClassSubclassScope);
   }
     
   /// Get this function's noinline attribute.
@@ -590,6 +571,20 @@ public:
     return (ClangNodeOwner ? ClangNodeOwner->getClangDecl() : nullptr);
   }
 
+  /// Returns whether this function is a specialization.
+  bool isSpecialization() const { return SpecializationInfo != nullptr; }
+
+  /// Return the specialization information.
+  const GenericSpecializationInformation *getSpecializationInfo() const {
+    assert(isSpecialization());
+    return SpecializationInfo;
+  }
+
+  void setSpecializationInfo(const GenericSpecializationInformation *Info) {
+    assert(!isSpecialization());
+    SpecializationInfo = Info;
+  }
+
   /// Retrieve the generic environment containing the mapping from interface
   /// types to context archetypes for this function. Only present if the
   /// function has a body.
@@ -629,11 +624,14 @@ public:
   const BlockListType &getBlocks() const { return BlockList; }
 
   typedef BlockListType::iterator iterator;
+  typedef BlockListType::reverse_iterator reverse_iterator;
   typedef BlockListType::const_iterator const_iterator;
 
   bool empty() const { return BlockList.empty(); }
   iterator begin() { return BlockList.begin(); }
   iterator end() { return BlockList.end(); }
+  reverse_iterator rbegin() { return BlockList.rbegin(); }
+  reverse_iterator rend() { return BlockList.rend(); }
   const_iterator begin() const { return BlockList.begin(); }
   const_iterator end() const { return BlockList.end(); }
   unsigned size() const { return BlockList.size(); }
@@ -691,7 +689,17 @@ public:
                           return isa<ThrowInst>(TI);
                         });
   }
-    
+
+  /// Loop over all blocks in this function and add all function exiting blocks
+  /// to output.
+  void findExitingBlocks(llvm::SmallVectorImpl<SILBasicBlock *> &output) const {
+    for (auto &Block : const_cast<SILFunction &>(*this)) {
+      if (Block.getTerminator()->isFunctionExiting()) {
+        output.emplace_back(&Block);
+      }
+    }
+  }
+
   //===--------------------------------------------------------------------===//
   // Argument Helper Methods
   //===--------------------------------------------------------------------===//

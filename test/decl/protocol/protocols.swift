@@ -26,6 +26,8 @@ protocol Test2 {
 
   associatedtype mytype
   associatedtype mybadtype = Int
+
+  associatedtype V : Test = // expected-error {{expected type in associated type declaration}} {{28-28= <#type#>}}
 }
 
 func test1() {
@@ -36,7 +38,9 @@ func test1() {
   v1.creator = "Me"                   // expected-error {{cannot assign to property: 'creator' is a get-only property}}
 }
 
-protocol Bogus : Int {} // expected-error{{inheritance from non-protocol, non-class type 'Int'}}
+protocol Bogus : Int {}
+// expected-error@-1{{inheritance from non-protocol type 'Int'}}
+// expected-error@-2{{type 'Self' constrained to non-protocol, non-class type 'Int'}}
 
 // Explicit conformance checks (successful).
 
@@ -71,6 +75,25 @@ enum NotPrintableO : Any, CustomStringConvertible {} // expected-error{{type 'No
 
 struct NotFormattedPrintable : FormattedPrintable { // expected-error{{type 'NotFormattedPrintable' does not conform to protocol 'CustomStringConvertible'}}
   func print(format: TestFormat) {} // expected-note{{candidate has non-matching type '(TestFormat) -> ()'}}
+}
+
+// Protocol compositions in inheritance clauses
+protocol Left {
+  func l() // expected-note {{protocol requires function 'l()' with type '() -> ()'; do you want to add a stub?}}
+}
+protocol Right {
+  func r() // expected-note {{protocol requires function 'r()' with type '() -> ()'; do you want to add a stub?}}
+}
+typealias Both = Left & Right
+
+protocol Up : Both {
+  func u()
+}
+
+struct DoesNotConform : Up {
+  // expected-error@-1 {{type 'DoesNotConform' does not conform to protocol 'Left'}}
+  // expected-error@-2 {{type 'DoesNotConform' does not conform to protocol 'Right'}}
+  func u() {}
 }
 
 // Circular protocols
@@ -184,6 +207,12 @@ protocol GetATuple {
 struct IntStringGetter : GetATuple {
   typealias Tuple = (i: Int, s: String)
   func getATuple() -> Tuple {}
+}
+
+protocol ClassConstrainedAssocType {
+  associatedtype T : class
+  // expected-error@-1 {{'class' constraint can only appear on protocol declarations}}
+  // expected-note@-2 {{did you mean to write an 'AnyObject' constraint?}}{{22-27=AnyObject}}
 }
 
 //===----------------------------------------------------------------------===//
@@ -345,8 +374,8 @@ final class ClassNode : IntrusiveListNode {
 }
 
 struct StructNode : IntrusiveListNode { // expected-error{{non-class type 'StructNode' cannot conform to class protocol 'IntrusiveListNode'}}
-  // expected-error@-1{{value type 'StructNode' cannot have a stored property that references itself}}
-  var next : StructNode
+  var next : StructNode  // expected-error {{value type 'StructNode' cannot have a stored property that recursively contains it}}
+
 }
 
 final class ClassNodeByExtension { }
@@ -375,8 +404,7 @@ final class GenericClassNode<T> : IntrusiveListNode {
 }
 
 struct GenericStructNode<T> : IntrusiveListNode { // expected-error{{non-class type 'GenericStructNode<T>' cannot conform to class protocol 'IntrusiveListNode'}}
-  // expected-error@-1{{value type 'GenericStructNode<T>' cannot have a stored property that references itself}}
-  var next : GenericStructNode<T>
+  var next : GenericStructNode<T> // expected-error {{value type 'GenericStructNode<T>' cannot have a stored property that recursively contains it}}
 }
 
 // Refined protocols inherit class-ness
@@ -391,8 +419,7 @@ final class ClassDNode : IntrusiveDListNode {
 
 struct StructDNode : IntrusiveDListNode { // expected-error{{non-class type 'StructDNode' cannot conform to class protocol 'IntrusiveDListNode'}}
   // expected-error@-1{{non-class type 'StructDNode' cannot conform to class protocol 'IntrusiveListNode'}}
-  // expected-error@-2{{value type 'StructDNode' cannot have a stored property that references itself}}
-  var prev : StructDNode
+  var prev : StructDNode // expected-error {{value type 'StructDNode' cannot have a stored property that recursively contains it}}
   var next : StructDNode
 }
 
@@ -427,7 +454,7 @@ struct X4 : P1 { // expected-error{{type 'X4' does not conform to protocol 'P1'}
 
 protocol ShouldntCrash {
   // rdar://16109996
-  let fullName: String { get }  // expected-error {{'let' declarations cannot be computed properties}}
+  let fullName: String { get }  // expected-error {{'let' declarations cannot be computed properties}} {{3-6=var}}
   
   // <rdar://problem/17200672> Let in protocol causes unclear errors and crashes
   let fullName2: String  // expected-error {{immutable property requirement must be declared as 'var' with a '{ get }' specifier}}
@@ -439,7 +466,7 @@ protocol ShouldntCrash {
 
 // rdar://problem/18168866
 protocol FirstProtocol {
-    weak var delegate : SecondProtocol? { get } // expected-error{{'weak' may only be applied to class and class-bound protocol types, not 'SecondProtocol'}}
+    weak var delegate : SecondProtocol? { get } // expected-error{{'weak' may not be applied to non-class-bound 'SecondProtocol'; consider adding a protocol conformance that has a class bound}}
 }
 
 protocol SecondProtocol {
@@ -470,4 +497,16 @@ protocol P4 {
 
 class C4 : P4 { // expected-error {{type 'C4' does not conform to protocol 'P4'}}
   associatedtype T = Int  // expected-error {{associated types can only be defined in a protocol; define a type or introduce a 'typealias' to satisfy an associated type requirement}} {{3-17=typealias}}
+}
+
+// <rdar://problem/25185722> Crash with invalid 'let' property in protocol
+protocol LetThereBeCrash {
+  let x: Int
+  // expected-error@-1 {{immutable property requirement must be declared as 'var' with a '{ get }' specifier}}
+  // expected-note@-2 {{change 'let' to 'var' to make it mutable}}
+}
+
+extension LetThereBeCrash {
+  init() { x = 1 }
+  // expected-error@-1 {{cannot assign to property: 'x' is a 'let' constant}}
 }

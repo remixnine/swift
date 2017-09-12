@@ -21,15 +21,10 @@ extension _SwiftNewtypeWrapper where Self.RawValue : Hashable {
   }
 }
 
-% for op in ['<', '>', '<=', '>=']:
-public func ${op} <T: _SwiftNewtypeWrapper>(lhs: T, rhs: T) -> Bool
-  where T : Comparable, T.RawValue : Comparable {
-  return lhs.rawValue ${op} rhs.rawValue
-}
-% end
-
 #if _runtime(_ObjC)
 extension _SwiftNewtypeWrapper where Self.RawValue : _ObjectiveCBridgeable {
+  public typealias _ObjectiveCType = Self.RawValue._ObjectiveCType
+
   public func _bridgeToObjectiveC() -> Self.RawValue._ObjectiveCType {
     return rawValue._bridgeToObjectiveC()
   }

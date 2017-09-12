@@ -10,9 +10,12 @@
 //
 //===----------------------------------------------------------------------===//
 
+#include "clang/AST/Decl.h"
+#include "clang/Basic/Module.h"
 #include "SwiftASTManager.h"
 #include "SwiftEditorDiagConsumer.h"
 #include "SwiftLangSupport.h"
+#include "SourceKit/Support/Logging.h"
 #include "SourceKit/Support/UIdent.h"
 
 #include "swift/AST/ASTPrinter.h"
@@ -23,6 +26,7 @@
 #include "swift/IDE/CommentConversion.h"
 #include "swift/IDE/ModuleInterfacePrinting.h"
 #include "swift/IDE/SyntaxModel.h"
+#include "swift/IDE/Refactoring.h"
 // This is included only for createLazyResolver(). Move to different header ?
 #include "swift/Sema/IDETypeChecking.h"
 #include "swift/Config.h"
@@ -106,12 +110,12 @@ class AnnotatingPrinter : public StreamPrinter {
   DefaultImplementMap *DefaultMapToUse = nullptr;
 
   void initDefaultMapToUse(const Decl *D) {
-    const ExtensionDecl *ED = dyn_cast<ExtensionDecl>(D);
+    const auto *ED = dyn_cast<ExtensionDecl>(D);
     if (!ED)
       return;
     if (ED->getExtendedType()) {
       if (auto NTD = ED->getExtendedType()->getAnyNominal()) {
-        if (ProtocolDecl *PD = dyn_cast<ProtocolDecl>(NTD)) {
+        if (auto *PD = dyn_cast<ProtocolDecl>(NTD)) {
           auto Pair = AllDefaultMaps.insert({PD, DefaultImplementMap()});
           DefaultMapToUse = &Pair.first->getSecond();
           if (Pair.second) {
@@ -132,7 +136,7 @@ class AnnotatingPrinter : public StreamPrinter {
   ValueDecl *getDefaultImplementation(const Decl *D) {
     if (!DefaultMapToUse)
       return nullptr;
-    ValueDecl *VD = const_cast<ValueDecl*>(dyn_cast<ValueDecl>(D));
+    auto *VD = const_cast<ValueDecl*>(dyn_cast<ValueDecl>(D));
     auto Found = DefaultMapToUse->find(VD);
     if (Found != DefaultMapToUse->end()) {
       return Found->second;
@@ -147,7 +151,7 @@ public:
 
   using StreamPrinter::StreamPrinter;
 
-  ~AnnotatingPrinter() {
+  ~AnnotatingPrinter() override {
     assert(EntitiesStack.empty());
   }
 
@@ -250,7 +254,7 @@ struct SourceTextInfo {
   std::vector<TextReference> References;
 };
 
-}
+} // end anonymous namespace
 
 static void initDocGenericParams(const Decl *D, DocEntityInfo &Info) {
   auto *DC = dyn_cast<DeclContext>(D);
@@ -297,6 +301,8 @@ static bool initDocEntityInfo(const Decl *D, const Decl *SynthesizedTarget,
                               bool IsRef, bool IsSynthesizedExtension,
                               DocEntityInfo &Info,
                               StringRef Arg = StringRef()) {
+  if (!IsRef && D->isImplicit())
+    return true;
   if (!D || isa<ParamDecl>(D) ||
       (isa<VarDecl>(D) && D->getDeclContext()->isLocalContext())) {
     Info.Kind = SwiftLangSupport::getUIDForLocalVar(IsRef);
@@ -320,7 +326,7 @@ static bool initDocEntityInfo(const Decl *D, const Decl *SynthesizedTarget,
 
   if (Info.Kind.isInvalid())
     return true;
-  if (const ValueDecl *VD = dyn_cast<ValueDecl>(D)) {
+  if (const auto *VD = dyn_cast<ValueDecl>(D)) {
     llvm::raw_svector_ostream NameOS(Info.Name);
     SwiftLangSupport::printDisplayName(VD, NameOS);
     {
@@ -391,6 +397,44 @@ static bool initDocEntityInfo(const Decl *D, const Decl *SynthesizedTarget,
     }
   }
 
+  switch(D->getDeclContext()->getContextKind()) {
+    case DeclContextKind::AbstractClosureExpr:
+    case DeclContextKind::TopLevelCodeDecl:
+    case DeclContextKind::AbstractFunctionDecl:
+    case DeclContextKind::SubscriptDecl:
+    case DeclContextKind::Initializer:
+    case DeclContextKind::SerializedLocal:
+    case DeclContextKind::ExtensionDecl:
+    case DeclContextKind::GenericTypeDecl:
+      break;
+
+    // We report sub-module information only for top-level decls.
+    case DeclContextKind::Module:
+    case DeclContextKind::FileUnit: {
+      if (auto *CD = D->getClangDecl()) {
+        if (auto *M = CD->getImportedOwningModule()) {
+          const clang::Module *Root = M->getTopLevelModule();
+
+          // If Root differs from the owning module, then the owning module is
+          // a sub-module.
+          if (M != Root) {
+            llvm::raw_svector_ostream OS(Info.SubModuleName);
+            llvm::SmallVector<StringRef, 4> Names;
+
+            // Climb up and collect sub-module names.
+            for (auto Current = M; Current != Root; Current = Current->Parent) {
+              Names.insert(Names.begin(), Current->Name);
+            }
+            OS << Root->Name;
+            std::for_each(Names.begin(), Names.end(),
+                          [&](StringRef N) { OS << "." << N; });
+          }
+        }
+      }
+      break;
+    }
+  }
+
   return false;
 }
 
@@ -437,7 +481,7 @@ static void passInherits(ArrayRef<TypeLoc> InheritedTypes,
 
     if (auto ProtoComposition
                = Inherited.getType()->getAs<ProtocolCompositionType>()) {
-      for (auto T : ProtoComposition->getProtocols())
+      for (auto T : ProtoComposition->getMembers())
         passInherits(TypeLoc::withoutLoc(T), Consumer);
       continue;
     }
@@ -475,7 +519,7 @@ static void reportRelated(ASTContext &Ctx,
                           DocInfoConsumer &Consumer) {
   if (!D || isa<ParamDecl>(D))
     return;
-  if (const ExtensionDecl *ED = dyn_cast<ExtensionDecl>(D)) {
+  if (const auto *ED = dyn_cast<ExtensionDecl>(D)) {
     if (SynthesizedTarget) {
       passExtends((ValueDecl*)SynthesizedTarget, Consumer);
     } else if (Type T = ED->getExtendedType()) {
@@ -501,7 +545,7 @@ static void reportRelated(ASTContext &Ctx,
 
     // Otherwise, report the inheritance of the type alias itself.
     passInheritsAndConformancesForValueDecl(TAD, Consumer);
-  } else if (const TypeDecl *TD = dyn_cast<TypeDecl>(D)) {
+  } else if (const auto *TD = dyn_cast<TypeDecl>(D)) {
     passInherits(TD->getInherited(), Consumer);
     passConforms(TD->getSatisfiedProtocolRequirements(/*Sorted=*/true),
                  Consumer);
@@ -720,10 +764,11 @@ private:
     }
   }
 };
-}
+} // end anonymous namespace
 
-static bool makeParserAST(CompilerInstance &CI, StringRef Text) {
-  CompilerInvocation Invocation;
+static bool makeParserAST(CompilerInstance &CI, StringRef Text,
+                          CompilerInvocation Invocation) {
+  Invocation.clearInputs();
   Invocation.setModuleName("main");
   Invocation.setInputKind(InputFileKind::IFK_Swift);
 
@@ -854,7 +899,7 @@ public:
     return false; // skip body.
   }
 };
-}
+} // end anonymous namespace
 
 static void addParameterEntities(CompilerInstance &CI,
                                  SourceTextInfo &IFaceInfo) {
@@ -934,7 +979,7 @@ static bool reportModuleDocInfo(CompilerInvocation Invocation,
     return true;
 
   CompilerInstance ParseCI;
-  if (makeParserAST(ParseCI, IFaceInfo.Text))
+  if (makeParserAST(ParseCI, IFaceInfo.Text, Invocation))
     return true;
   addParameterEntities(ParseCI, IFaceInfo);
 
@@ -958,7 +1003,7 @@ public:
   SourceDocASTWalker(SourceManager &SM, unsigned BufferID)
     : SM(SM), BufferID(BufferID) {}
 
-  ~SourceDocASTWalker() {
+  ~SourceDocASTWalker() override {
     assert(EntitiesStack.empty());
   }
 
@@ -1015,7 +1060,7 @@ public:
     return TextRange{ Start, End-Start };
   }
 };
-}
+} // end anonymous namespace
 
 static bool getSourceTextInfo(CompilerInstance &CI,
                               SourceTextInfo &Info) {
@@ -1069,6 +1114,288 @@ static bool reportSourceDocInfo(CompilerInvocation Invocation,
   return false;
 }
 
+class RequestRefactoringEditConsumer::Implementation {
+public:
+  CategorizedEditsReceiver Receiver;
+  std::vector<Edit> AllEdits;
+  std::vector<std::pair<unsigned, unsigned>> StartEnds;
+  std::vector<UIdent> UIds;
+  SmallString<64> ErrBuffer;
+  llvm::raw_svector_ostream OS;
+  PrintingDiagnosticConsumer DiagConsumer;
+  Implementation(CategorizedEditsReceiver Receiver):
+    Receiver(std::move(Receiver)), OS(ErrBuffer), DiagConsumer(OS) {}
+  ~Implementation() {
+    if (DiagConsumer.didErrorOccur()) {
+      Receiver({}, OS.str());
+      return;
+    }
+    assert(UIds.size() == StartEnds.size());
+    std::vector<CategorizedEdits> Results;
+    for (unsigned I = 0, N = UIds.size(); I < N; I ++) {
+      auto Pair = StartEnds[I];
+      Results.push_back({UIds[I],
+                         llvm::makeArrayRef(AllEdits.data() + Pair.first,
+                                             Pair.second - Pair.first)});
+    }
+    Receiver(Results, "");
+  }
+  void accept(SourceManager &SM, RegionType RegionType,
+              ArrayRef<Replacement> Replacements) {
+    unsigned Start = AllEdits.size();
+    std::transform(Replacements.begin(), Replacements.end(),
+                   std::back_inserter(AllEdits),
+                   [&](const Replacement &R) -> Edit {
+      std::pair<unsigned, unsigned>
+        Start = SM.getLineAndColumn(R.Range.getStart()),
+        End = SM.getLineAndColumn(R.Range.getEnd());
+      SmallVector<NoteRegion, 4> SubRanges;
+      auto RawRanges = R.RegionsWorthNote;
+      std::transform(RawRanges.begin(), RawRanges.end(),
+                     std::back_inserter(SubRanges),
+                     [](swift::ide::NoteRegion R) -> SourceKit::NoteRegion {
+                       return {
+                         SwiftLangSupport::getUIDForRefactoringRangeKind(R.Kind),
+                         R.StartLine, R.StartColumn, R.EndLine, R.EndColumn,
+                         R.ArgIndex
+                       }; });
+      return {Start.first, Start.second, End.first, End.second, R.Text,
+        std::move(SubRanges)};
+    });
+    unsigned End = AllEdits.size();
+    StartEnds.emplace_back(Start, End);
+    UIds.push_back(SwiftLangSupport::getUIDForRegionType(RegionType));
+  }
+};
+
+RequestRefactoringEditConsumer::
+RequestRefactoringEditConsumer(CategorizedEditsReceiver Receiver) :
+  Impl(*new Implementation(Receiver)) {}
+
+RequestRefactoringEditConsumer::
+~RequestRefactoringEditConsumer() { delete &Impl; };
+
+void RequestRefactoringEditConsumer::
+accept(SourceManager &SM, RegionType RegionType,
+       ArrayRef<Replacement> Replacements) {
+  Impl.accept(SM, RegionType, Replacements);
+}
+
+void RequestRefactoringEditConsumer::
+handleDiagnostic(SourceManager &SM, SourceLoc Loc, DiagnosticKind Kind,
+                 StringRef FormatString,
+                 ArrayRef<DiagnosticArgument> FormatArgs,
+                 const DiagnosticInfo &Info) {
+  Impl.DiagConsumer.handleDiagnostic(SM, Loc, Kind, FormatString, FormatArgs,
+                                     Info);
+}
+
+class RequestRenameRangeConsumer::Implementation {
+  CategorizedRenameRangesReceiver Receiver;
+  std::string ErrBuffer;
+  llvm::raw_string_ostream OS;
+  std::vector<CategorizedRenameRanges> CategorizedRanges;
+
+public:
+  PrintingDiagnosticConsumer DiagConsumer;
+
+public:
+  Implementation(CategorizedRenameRangesReceiver Receiver)
+      : Receiver(Receiver), OS(ErrBuffer), DiagConsumer(OS) {}
+
+  ~Implementation() {
+    if (DiagConsumer.didErrorOccur()) {
+      Receiver({}, OS.str());
+      return;
+    }
+    Receiver(CategorizedRanges, "");
+  }
+
+  void accept(SourceManager &SM, RegionType RegionType,
+              ArrayRef<ide::RenameRangeDetail> Ranges) {
+    CategorizedRenameRanges Results;
+    Results.Category = SwiftLangSupport::getUIDForRegionType(RegionType);
+    for (const auto &R : Ranges) {
+      SourceKit::RenameRangeDetail Result;
+      std::tie(Result.StartLine, Result.StartColumn) =
+          SM.getLineAndColumn(R.Range.getStart());
+      std::tie(Result.EndLine, Result.EndColumn) =
+          SM.getLineAndColumn(R.Range.getEnd());
+      Result.ArgIndex = R.Index;
+      Result.Kind =
+          SwiftLangSupport::getUIDForRefactoringRangeKind(R.RangeKind);
+      Results.Ranges.push_back(std::move(Result));
+    }
+    CategorizedRanges.push_back(std::move(Results));
+  }
+};
+
+RequestRenameRangeConsumer::RequestRenameRangeConsumer(
+    CategorizedRenameRangesReceiver Receiver)
+    : Impl(*new Implementation(Receiver)) {}
+RequestRenameRangeConsumer::~RequestRenameRangeConsumer() { delete &Impl; }
+
+void RequestRenameRangeConsumer::accept(
+    SourceManager &SM, RegionType RegionType,
+    ArrayRef<ide::RenameRangeDetail> Ranges) {
+  Impl.accept(SM, RegionType, Ranges);
+}
+
+void RequestRenameRangeConsumer::
+handleDiagnostic(SourceManager &SM,
+                 SourceLoc Loc,
+                 DiagnosticKind Kind,
+                 StringRef FormatString,
+                 ArrayRef<DiagnosticArgument> FormatArgs,
+                 const DiagnosticInfo &Info) {
+  Impl.DiagConsumer.handleDiagnostic(SM, Loc, Kind, FormatString, FormatArgs,
+                                     Info);
+}
+
+static NameUsage getNameUsage(RenameType Type) {
+  switch (Type) {
+  case RenameType::Definition:
+    return NameUsage::Definition;
+  case RenameType::Reference:
+    return NameUsage::Reference;
+  case RenameType::Call:
+    return NameUsage::Call;
+  case RenameType::Unknown:
+    return NameUsage::Unknown;
+  }
+}
+
+static std::vector<RenameLoc>
+getSyntacticRenameLocs(ArrayRef<RenameLocations> RenameLocations);
+
+void SwiftLangSupport::
+syntacticRename(llvm::MemoryBuffer *InputBuf,
+                ArrayRef<RenameLocations> RenameLocations,
+                ArrayRef<const char*> Args,
+                CategorizedEditsReceiver Receiver) {
+  std::string Error;
+  CompilerInstance ParseCI;
+  PrintingDiagnosticConsumer PrintDiags;
+  ParseCI.addDiagnosticConsumer(&PrintDiags);
+  SourceFile *SF = getSyntacticSourceFile(InputBuf, Args, ParseCI, Error);
+  if (!SF) {
+    Receiver({}, Error);
+    return;
+  }
+
+  auto RenameLocs = getSyntacticRenameLocs(RenameLocations);
+  RequestRefactoringEditConsumer EditConsumer(Receiver);
+  swift::ide::syntacticRename(SF, RenameLocs, EditConsumer, EditConsumer);
+}
+
+void SwiftLangSupport::findRenameRanges(
+    llvm::MemoryBuffer *InputBuf, ArrayRef<RenameLocations> RenameLocations,
+    ArrayRef<const char *> Args, CategorizedRenameRangesReceiver Receiver) {
+  std::string Error;
+  CompilerInstance ParseCI;
+  PrintingDiagnosticConsumer PrintDiags;
+  ParseCI.addDiagnosticConsumer(&PrintDiags);
+  SourceFile *SF = getSyntacticSourceFile(InputBuf, Args, ParseCI, Error);
+  if (!SF) {
+    Receiver({}, Error);
+    return;
+  }
+
+  auto RenameLocs = getSyntacticRenameLocs(RenameLocations);
+  RequestRenameRangeConsumer Consumer(Receiver);
+  swift::ide::findSyntacticRenameRanges(SF, RenameLocs, Consumer, Consumer);
+}
+
+void SwiftLangSupport::findLocalRenameRanges(
+    StringRef Filename, unsigned Line, unsigned Column, unsigned Length,
+    ArrayRef<const char *> Args, CategorizedRenameRangesReceiver Receiver) {
+  std::string Error;
+  SwiftInvocationRef Invok = ASTMgr->getInvocation(Args, Filename, Error);
+  if (!Invok) {
+    // FIXME: Report it as failed request.
+    LOG_WARN_FUNC("failed to create an ASTInvocation: " << Error);
+    Receiver({}, Error);
+    return;
+  }
+
+  struct LocalRenameRangeASTConsumer : public SwiftASTConsumer {
+    unsigned Line, Column, Length;
+    CategorizedRenameRangesReceiver Receiver;
+
+    LocalRenameRangeASTConsumer(unsigned Line, unsigned Column, unsigned Length,
+                                CategorizedRenameRangesReceiver Receiver)
+        : Line(Line), Column(Column), Length(Length),
+          Receiver(std::move(Receiver)) {}
+
+    void handlePrimaryAST(ASTUnitRef AstUnit) override {
+      auto &SF = AstUnit->getPrimarySourceFile();
+      swift::ide::RangeConfig Range{*SF.getBufferID(), Line, Column, Length};
+      RequestRenameRangeConsumer Consumer(std::move(Receiver));
+      swift::ide::findLocalRenameRanges(&SF, Range, Consumer, Consumer);
+    }
+
+    void cancelled() override { Receiver({}, "The refactoring is canceled."); }
+
+    void failed(StringRef Error) override { Receiver({}, Error); }
+  };
+
+  auto ASTConsumer = std::make_shared<LocalRenameRangeASTConsumer>(
+      Line, Column, Length, std::move(Receiver));
+  /// FIXME: When request cancellation is implemented and Xcode adopts it,
+  /// don't use 'OncePerASTToken'.
+  static const char OncePerASTToken = 0;
+  getASTManager().processASTAsync(Invok, ASTConsumer, &OncePerASTToken);
+}
+
+SourceFile *SwiftLangSupport::getSyntacticSourceFile(
+    llvm::MemoryBuffer *InputBuf, ArrayRef<const char *> Args,
+    CompilerInstance &ParseCI, std::string &Error) {
+  CompilerInvocation Invocation;
+
+  bool Failed = getASTManager().initCompilerInvocation(Invocation, Args,
+                                                       ParseCI.getDiags(),
+                                                       StringRef(), Error);
+  if (Failed) {
+    Error = "Compiler invocation init failed";
+    return nullptr;
+  }
+  Invocation.setInputKind(InputFileKind::IFK_Swift);
+  Invocation.addInputBuffer(InputBuf);
+
+  if (ParseCI.setup(Invocation)) {
+    Error = "Compiler invocation set up failed";
+    return nullptr;
+  }
+  ParseCI.performParseOnly(/*EvaluateConditionals*/true);
+
+  SourceFile *SF = nullptr;
+  unsigned BufferID = ParseCI.getInputBufferIDs().back();
+  for (auto Unit : ParseCI.getMainModule()->getFiles()) {
+    if (auto Current = dyn_cast<SourceFile>(Unit)) {
+      if (Current->getBufferID().getValue() == BufferID) {
+        SF = Current;
+        break;
+      }
+    }
+  }
+  if (!SF)
+    Error = "Failed to determine SourceFile for input buffer";
+  return SF;
+}
+
+static std::vector<RenameLoc>
+getSyntacticRenameLocs(ArrayRef<RenameLocations> RenameLocations) {
+  std::vector<RenameLoc> RenameLocs;
+  for(const auto &Locations: RenameLocations) {
+    for(const auto &Location: Locations.LineColumnLocs) {
+      RenameLocs.push_back({Location.Line, Location.Column,
+        getNameUsage(Location.Type), Locations.OldName, Locations.NewName,
+        Locations.IsFunctionLike, Locations.IsNonProtocolType});
+    }
+  }
+  return RenameLocs;
+}
+
 void SwiftLangSupport::getDocInfo(llvm::MemoryBuffer *InputBuf,
                                   StringRef ModuleName,
                                   ArrayRef<const char *> Args,
@@ -1102,10 +1429,10 @@ void SwiftLangSupport::getDocInfo(llvm::MemoryBuffer *InputBuf,
     Consumer.failed("Error occurred");
 }
 
-void SwiftLangSupport::findModuleGroups(StringRef ModuleName,
-                                        ArrayRef<const char *> Args,
-                                        std::function<void(ArrayRef<StringRef>,
-                                                           StringRef Error)> Receiver) {
+void SwiftLangSupport::
+findModuleGroups(StringRef ModuleName, ArrayRef<const char *> Args,
+                 std::function<void(ArrayRef<StringRef>,
+                                    StringRef Error)> Receiver) {
   CompilerInvocation Invocation;
   Invocation.getClangImporterOptions().ImportForwardDeclarations = true;
   Invocation.clearInputs();

@@ -1,4 +1,4 @@
-// RUN: %target-swift-frontend -emit-silgen %s | %FileCheck %s
+// RUN: %target-swift-frontend -emit-silgen -enable-sil-ownership %s | %FileCheck %s
 class C {}
 
 enum Foo {
@@ -47,10 +47,12 @@ func testShuffleOpaque() {
   // CHECK-NEXT: [[T0:%.*]] = function_ref @_T06tuples7make_xySi1x_AA1P_p1ytyF
   // CHECK-NEXT: [[TEMP:%.*]] = alloc_stack $P
   // CHECK-NEXT: [[T1:%.*]] = apply [[T0]]([[TEMP]])
-  // CHECK-NEXT: [[PAIR_0:%.*]] = tuple_element_addr [[PBPAIR]] : $*(y: P, x: Int), 0
+  // CHECK-NEXT: [[WRITE:%.*]] = begin_access [modify] [unknown] [[PBPAIR]] : $*(y: P, x: Int)
+  // CHECK-NEXT: [[PAIR_0:%.*]] = tuple_element_addr [[WRITE]] : $*(y: P, x: Int), 0
   // CHECK-NEXT: copy_addr [take] [[TEMP]] to [[PAIR_0]]
-  // CHECK-NEXT: [[PAIR_1:%.*]] = tuple_element_addr [[PBPAIR]] : $*(y: P, x: Int), 1
+  // CHECK-NEXT: [[PAIR_1:%.*]] = tuple_element_addr [[WRITE]] : $*(y: P, x: Int), 1
   // CHECK-NEXT: assign [[T1]] to [[PAIR_1]]
+  // CHECK-NEXT: end_access [[WRITE]] : $*(y: P, x: Int)
   // CHECK-NEXT: dealloc_stack [[TEMP]]
   pair = make_xy()
 }
@@ -92,10 +94,12 @@ func testShuffleTuple() {
   // CHECK-NEXT: [[T0:%.*]] = function_ref @_T06tuples6make_pAA1P_pyF 
   // CHECK-NEXT: [[TEMP:%.*]] = alloc_stack $P
   // CHECK-NEXT: apply [[T0]]([[TEMP]])
-  // CHECK-NEXT: [[PAIR_0:%.*]] = tuple_element_addr [[PBPAIR]] : $*(y: P, x: Int), 0
+  // CHECK-NEXT: [[WRITE:%.*]] = begin_access [modify] [unknown] [[PBPAIR]] : $*(y: P, x: Int)
+  // CHECK-NEXT: [[PAIR_0:%.*]] = tuple_element_addr [[WRITE]] : $*(y: P, x: Int), 0
   // CHECK-NEXT: copy_addr [take] [[TEMP]] to [[PAIR_0]]
-  // CHECK-NEXT: [[PAIR_1:%.*]] = tuple_element_addr [[PBPAIR]] : $*(y: P, x: Int), 1
+  // CHECK-NEXT: [[PAIR_1:%.*]] = tuple_element_addr [[WRITE]] : $*(y: P, x: Int), 1
   // CHECK-NEXT: assign [[INT]] to [[PAIR_1]]
+  // CHECK-NEXT: end_access [[WRITE]] : $*(y: P, x: Int)
   // CHECK-NEXT: dealloc_stack [[TEMP]]
   pair = (x: make_int(), y: make_p())
 }
@@ -128,3 +132,31 @@ func testTupleUnsplat() {
   // CHECK: apply [[REABSTRACTED]]([[X]], [[Y]])
   _ = GenericEnum<(Int, Int)>.callback(x, y)
 } // CHECK: end sil function '_T06tuples16testTupleUnsplatyyF'
+
+// Make sure that we use a load_borrow instead of a load [take] when RValues are
+// formed with isGuaranteed set.
+extension P {
+  // CHECK-LABEL: sil hidden @_T06tuples1PPAAE12immutableUseyAA1CC5index_x5valuet5tuple_tFZ
+  // CHECK: bb0([[TUP0:%.*]] : @owned $C, [[TUP1:%.*]] : @trivial $*Self
+  // Allocate space for the RValue.
+  // CHECK:   [[RVALUE:%.*]] = alloc_stack $(index: C, value: Self), let, name "tuple"
+  //
+  // Initialize the RValue. (This is here to help pattern matching).
+  // CHECK:   [[ZERO_ADDR:%.*]] = tuple_element_addr [[RVALUE]] : $*(index: C, value: Self), 0
+  // CHECK:   store [[TUP0]] to [init] [[ZERO_ADDR]]
+  // CHECK:   [[ONE_ADDR:%.*]] = tuple_element_addr [[RVALUE]] : $*(index: C, value: Self), 1
+  // CHECK:   copy_addr [take] [[TUP1]] to [initialization] [[ONE_ADDR]]
+  //
+  // What we are actually trying to check. Note that there is no actual use of
+  // LOADED_CLASS. This is b/c of the nature of the RValue we are working with.
+  // CHECK:   [[ZERO_ADDR:%.*]] = tuple_element_addr [[RVALUE]] : $*(index: C, value: Self), 0
+  // CHECK:   [[LOADED_CLASS:%.*]] = load_borrow [[ZERO_ADDR]]
+  // CHECK:   [[ONE_ADDR:%.*]] = tuple_element_addr [[RVALUE]] : $*(index: C, value: Self), 1
+  // CHECK:   apply {{.*}}([[ONE_ADDR]]) : $@convention(witness_method)
+  // CHECK:   end_borrow [[LOADED_CLASS]] from [[ZERO_ADDR]]
+  // CHECK:   destroy_addr [[RVALUE]]
+  // CHECK:   dealloc_stack [[RVALUE]]
+  public static func immutableUse(tuple: (index: C, value: Self)) -> () {
+    return tuple.value.foo()
+  }
+}

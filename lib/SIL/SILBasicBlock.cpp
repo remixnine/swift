@@ -44,13 +44,18 @@ SILBasicBlock::~SILBasicBlock() {
 
   dropAllReferences();
 
-  // Notify the delete handlers that the instructions in this block are
-  // being deleted.
-  auto &M = getModule();
+  SILModule *M = nullptr;
+  if (getParent())
+    M = &getParent()->getModule();
+
   for (auto I = begin(), E = end(); I != E;) {
     auto Inst = &*I;
     ++I;
-    M.notifyDeleteHandlers(Inst);
+    if (M) {
+      // Notify the delete handlers that the instructions in this block are
+      // being deleted.
+      M->notifyDeleteHandlers(Inst);
+    }
     erase(Inst);
   }
 
@@ -90,12 +95,14 @@ void SILBasicBlock::remove(SILInstruction *I) {
   InstList.remove(I);
 }
 
-void SILBasicBlock::erase(SILInstruction *I) {
+/// Returns the iterator following the erased instruction.
+SILBasicBlock::iterator SILBasicBlock::erase(SILInstruction *I) {
   // Notify the delete handlers that this instruction is going away.
   getModule().notifyDeleteHandlers(&*I);
   auto *F = getParent();
-  InstList.erase(I);
+  auto nextIter = InstList.erase(I);
   F->getModule().deallocateInst(I);
+  return nextIter;
 }
 
 /// This method unlinks 'self' from the containing SILFunction and deletes it.
@@ -242,6 +249,14 @@ void SILBasicBlock::moveAfter(SILBasicBlock *After) {
   BlkList.splice(InsertPt, BlkList, this);
 }
 
+void SILBasicBlock::moveTo(SILBasicBlock::iterator To, SILInstruction *I) {
+  assert(I->getParent() != this && "Must move from different basic block");
+  InstList.splice(To, I->getParent()->InstList, I);
+  ScopeCloner ScopeCloner(*Parent);
+  SILBuilder B(*Parent);
+  I->setDebugScope(B, ScopeCloner.getOrCreateClonedScope(I->getDebugScope()));
+}
+
 void
 llvm::ilist_traits<swift::SILBasicBlock>::
 transferNodesFromList(llvm::ilist_traits<SILBasicBlock> &SrcTraits,
@@ -352,4 +367,8 @@ bool SILBasicBlock::isTrampoline() const {
   if (!Branch)
     return false;
   return begin() == Branch->getIterator();
+}
+
+bool SILBasicBlock::isLegalToHoistInto() const {
+  return true;
 }

@@ -1,5 +1,4 @@
-// RUN: rm -rf %t
-// RUN: mkdir -p %t
+// RUN: %empty-directory(%t)
 // RUN: %target-build-swift %s -o %t/a.out_Debug
 // RUN: %target-build-swift %s -o %t/a.out_Release -O
 //
@@ -64,7 +63,7 @@ SetTraps.test("RemoveFirstFromEmpty")
     { _isFastAssertConfiguration() },
     reason: "this trap is not guaranteed to happen in -Ounchecked"))
   .crashOutputMatches(_isDebugAssertConfiguration() ?
-    "can't removeFirst from an empty Set" : "")
+    "Can't removeFirst from an empty Set" : "")
   .code {
   var s = Set<Int>()
   expectCrashLater()

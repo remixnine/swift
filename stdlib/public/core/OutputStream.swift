@@ -84,7 +84,7 @@ extension TextOutputStream {
 /// Instances of types that conform to the `TextOutputStreamable` protocol can
 /// write their value to instances of any type that conforms to the
 /// `TextOutputStream` protocol. The Swift standard library's text-related
-/// types, `String`, `Character`, and `UnicodeScalar`, all conform to
+/// types, `String`, `Character`, and `Unicode.Scalar`, all conform to
 /// `TextOutputStreamable`.
 ///
 /// Conforming to the TextOutputStreamable Protocol
@@ -98,9 +98,6 @@ public protocol TextOutputStreamable {
   /// stream.
   func write<Target : TextOutputStream>(to target: inout Target)
 }
-
-@available(*, unavailable, renamed: "TextOutputStreamable")
-typealias Streamable = TextOutputStreamable
 
 /// A type with a customized textual representation.
 ///
@@ -144,8 +141,6 @@ typealias Streamable = TextOutputStreamable
 ///
 ///     print(p)
 ///     // Prints "(21, 30)"
-///
-/// - SeeAlso: `String.init<T>(T)`, `CustomDebugStringConvertible`
 public protocol CustomStringConvertible {
   /// A textual representation of this instance.
   ///
@@ -232,8 +227,6 @@ public protocol LosslessStringConvertible : CustomStringConvertible {
 ///
 ///     print(String(reflecting: p))
 ///     // Prints "Point(x: 21, y: 30)"
-///
-/// - SeeAlso: `String.init<T>(reflecting: T)`, `CustomStringConvertible`
 public protocol CustomDebugStringConvertible {
   /// A textual representation of this instance, suitable for debugging.
   var debugDescription: String { get }
@@ -561,7 +554,7 @@ extension Character : TextOutputStreamable {
   }
 }
 
-extension UnicodeScalar : TextOutputStreamable {
+extension Unicode.Scalar : TextOutputStreamable {
   /// Writes the textual representation of the Unicode scalar into the given
   /// output stream.
   ///

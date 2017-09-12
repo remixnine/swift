@@ -37,21 +37,24 @@ public:
       : SILOpenedArchetypesTracker(Tracker.F, Tracker) {}
 
   // Re-use pre-populated map if available.
-  SILOpenedArchetypesTracker(const SILFunction &F,
+  SILOpenedArchetypesTracker(const SILFunction *F,
                              SILOpenedArchetypesTracker &Tracker)
       : F(F), OpenedArchetypeDefs(Tracker.OpenedArchetypeDefs) { }
 
   // Re-use pre-populated map if available.
-  SILOpenedArchetypesTracker(const SILFunction &F,
+  SILOpenedArchetypesTracker(const SILFunction *F,
                              OpenedArchetypeDefsMap &OpenedArchetypeDefs)
       : F(F), OpenedArchetypeDefs(OpenedArchetypeDefs) { }
 
   // Use its own local map if no pre-populated map is provided.
-  SILOpenedArchetypesTracker(const SILFunction &F)
+  SILOpenedArchetypesTracker(const SILFunction *F)
       : F(F), OpenedArchetypeDefs(LocalOpenedArchetypeDefs) { }
 
 
-  const SILFunction &getFunction() const { return F; }
+  const SILFunction *getFunction() const {
+    assert(F && "no function context available");
+    return F;
+  }
 
   // Register a definition of a given opened archetype.
   void addOpenedArchetypeDef(CanArchetypeType archetype, SILValue Def);
@@ -78,16 +81,19 @@ public:
   // Can be used to incrementally populate the mapping, e.g.
   // if it is done when performing a scan of all instructions
   // inside a function.
-  void registerOpenedArchetypes(const SILInstruction *I);
+  // Returns true if any opened archetypes were registered.
+  bool registerOpenedArchetypes(const SILInstruction *I);
 
   // Register opened archetypes whose definitions are referenced by
   // the typedef operands of this instruction.
-  void registerUsedOpenedArchetypes(const SILInstruction *I);
+  // Returns true if any opened archetypes were registered.
+  bool registerUsedOpenedArchetypes(const SILInstruction *I);
 
   // Register opened archetypes referenced by this type, if they
   // are not registered yet. Create placeholders representing forward
   // definitions of these opened archetypes.
-  void registerUsedOpenedArchetypes(CanType Ty);
+  // Returns true if any opened archetypes were registered.
+  bool registerUsedOpenedArchetypes(CanType Ty);
 
   // Unregister archetypes opened by a given instruction.
   // Should be only called when this instruction is to be removed.
@@ -103,9 +109,13 @@ public:
   // Handle notifications about removals of instructions.
   void handleDeleteNotification(swift::ValueBase *Value);
 
+  // Dump the contents.
+  void dump() const;
+
   virtual ~SILOpenedArchetypesTracker() {
     // Unregister the handler.
-    F.getModule().removeDeleteNotificationHandler(this);
+    if (F)
+      F->getModule().removeDeleteNotificationHandler(this);
   }
 
 private:
@@ -113,7 +123,7 @@ private:
   SILOpenedArchetypesTracker &operator = (const SILOpenedArchetypesTracker &) = delete;
   /// The function whose opened archetypes are being tracked.
   /// Used only for verification purposes.
-  const SILFunction &F;
+  const SILFunction *F;
 
   /// Mapping from opened archetypes to their definitions.
   OpenedArchetypeDefsMap &OpenedArchetypeDefs;
@@ -158,6 +168,9 @@ public:
   /// performing a quick lookup in the opened archetypes operands
   /// and then in the opened archetypes tracker.
   SILValue getOpenedArchetypeDef(CanArchetypeType archetypeTy) const;
+
+  // Dump the contents.
+  void dump() const;
 };
 
 /// Find an opened archetype defined by an instruction.

@@ -1,5 +1,5 @@
-// RUN: %target-swift-frontend -Xllvm -sil-full-demangle -emit-silgen %s | %FileCheck %s
-// RUN: %target-swift-frontend -Xllvm -sil-full-demangle -emit-silgen %s | %FileCheck %s --check-prefix=GUARANTEED
+// RUN: %target-swift-frontend -Xllvm -sil-full-demangle -enable-sil-ownership -emit-silgen %s | %FileCheck %s
+// RUN: %target-swift-frontend -Xllvm -sil-full-demangle -enable-sil-ownership -emit-silgen %s | %FileCheck %s --check-prefix=GUARANTEED
 
 func test_type_lowering(_ x: Error) { }
 // CHECK-LABEL: sil hidden @_T018boxed_existentials18test_type_loweringys5Error_pF : $@convention(thin) (@owned Error) -> () {
@@ -18,7 +18,7 @@ func test_concrete_erasure(_ x: ClericalError) -> Error {
   return x
 }
 // CHECK-LABEL: sil hidden @_T018boxed_existentials21test_concrete_erasures5Error_pAA08ClericalF0OF
-// CHECK:       bb0([[ARG:%.*]] : $ClericalError):
+// CHECK:       bb0([[ARG:%.*]] : @owned $ClericalError):
 // CHECK:         [[EXISTENTIAL:%.*]] = alloc_existential_box $Error, $ClericalError
 // CHECK:         [[ADDR:%.*]] = project_existential_box $ClericalError in [[EXISTENTIAL]] : $Error
 // CHECK:         [[BORROWED_ARG:%.*]] = begin_borrow [[ARG]]
@@ -58,7 +58,7 @@ func test_property(_ x: Error) -> String {
   return x._domain
 }
 // CHECK-LABEL: sil hidden @_T018boxed_existentials13test_propertySSs5Error_pF
-// CHECK: bb0([[ARG:%.*]] : $Error):
+// CHECK: bb0([[ARG:%.*]] : @owned $Error):
 // CHECK:         [[BORROWED_ARG:%.*]] = begin_borrow [[ARG]]
 // CHECK:         [[VALUE:%.*]] = open_existential_box [[BORROWED_ARG]] : $Error to $*[[VALUE_TYPE:@opened\(.*\) Error]]
 // FIXME: Extraneous copy here
@@ -78,13 +78,14 @@ func test_property_of_lvalue(_ x: Error) -> String {
 }
 
 // CHECK-LABEL: sil hidden @_T018boxed_existentials23test_property_of_lvalueSSs5Error_pF :
-// CHECK:       bb0([[ARG:%.*]] : $Error):
+// CHECK:       bb0([[ARG:%.*]] : @owned $Error):
 // CHECK:         [[VAR:%.*]] = alloc_box ${ var Error }
 // CHECK:         [[PVAR:%.*]] = project_box [[VAR]]
 // CHECK:         [[BORROWED_ARG:%.*]] = begin_borrow [[ARG]]
 // CHECK:         [[ARG_COPY:%.*]] = copy_value [[BORROWED_ARG]] : $Error
 // CHECK:         store [[ARG_COPY]] to [init] [[PVAR]]
-// CHECK:         [[VALUE_BOX:%.*]] = load [copy] [[PVAR]]
+// CHECK:         [[ACCESS:%.*]] = begin_access [read] [unknown] [[PVAR]] : $*Error
+// CHECK:         [[VALUE_BOX:%.*]] = load [copy] [[ACCESS]]
 // CHECK:         [[VALUE:%.*]] = open_existential_box [[VALUE_BOX]] : $Error to $*[[VALUE_TYPE:@opened\(.*\) Error]]
 // CHECK:         [[COPY:%.*]] = alloc_stack $[[VALUE_TYPE]]
 // CHECK:         copy_addr [[VALUE]] to [initialization] [[COPY]]
@@ -103,7 +104,7 @@ extension Error {
 
 // CHECK-LABEL: sil hidden @_T018boxed_existentials21test_extension_methodys5Error_pF
 func test_extension_method(_ error: Error) {
-  // CHECK: bb0([[ARG:%.*]] : $Error):
+  // CHECK: bb0([[ARG:%.*]] : @owned $Error):
   // CHECK: [[BORROWED_ARG:%.*]] = begin_borrow [[ARG]]
   // CHECK: [[VALUE:%.*]] = open_existential_box [[BORROWED_ARG]]
   // CHECK: [[METHOD:%.*]] = function_ref
@@ -121,8 +122,8 @@ func plusOneError() -> Error { }
 
 // CHECK-LABEL: sil hidden @_T018boxed_existentials31test_open_existential_semanticsys5Error_p_sAC_ptF
 // GUARANTEED-LABEL: sil hidden @_T018boxed_existentials31test_open_existential_semanticsys5Error_p_sAC_ptF
-// CHECK: bb0([[ARG0:%.*]]: $Error,
-// GUARANTEED: bb0([[ARG0:%.*]]: $Error,
+// CHECK: bb0([[ARG0:%.*]]: @owned $Error,
+// GUARANTEED: bb0([[ARG0:%.*]]: @owned $Error,
 func test_open_existential_semantics(_ guaranteed: Error,
                                      _ immediate: Error) {
   var immediate = immediate
@@ -150,7 +151,8 @@ func test_open_existential_semantics(_ guaranteed: Error,
   // GUARANTEED-NOT: destroy_value [[ARG0]]
   guaranteed.extensionMethod()
 
-  // CHECK: [[IMMEDIATE:%.*]] = load [copy] [[PB]]
+  // CHECK: [[ACCESS:%.*]] = begin_access [read] [unknown] [[PB]] : $*Error
+  // CHECK: [[IMMEDIATE:%.*]] = load [copy] [[ACCESS]]
   // -- need a copy_value to guarantee
   // CHECK: [[VALUE:%.*]] = open_existential_box [[IMMEDIATE]]
   // CHECK: [[METHOD:%.*]] = function_ref
@@ -161,7 +163,8 @@ func test_open_existential_semantics(_ guaranteed: Error,
   //    out.
   // CHECK: destroy_value [[IMMEDIATE]]
 
-  // GUARANTEED: [[IMMEDIATE:%.*]] = load [copy] [[PB]]
+  // GUARANTEED: [[ACCESS:%.*]] = begin_access [read] [unknown] [[PB]] : $*Error
+  // GUARANTEED: [[IMMEDIATE:%.*]] = load [copy] [[ACCESS]]
   // -- need a copy_value to guarantee
   // GUARANTEED: [[VALUE:%.*]] = open_existential_box [[IMMEDIATE]]
   // GUARANTEED: [[METHOD:%.*]] = function_ref
@@ -190,7 +193,7 @@ func test_open_existential_semantics(_ guaranteed: Error,
 }
 
 // CHECK-LABEL: sil hidden @_T018boxed_existentials14erasure_to_anyyps5Error_p_sAC_ptF
-// CHECK:       bb0([[OUT:%.*]] : $*Any, [[GUAR:%.*]] : $Error,
+// CHECK:       bb0([[OUT:%.*]] : @trivial $*Any, [[GUAR:%.*]] : @owned $Error,
 func erasure_to_any(_ guaranteed: Error, _ immediate: Error) -> Any {
   var immediate = immediate
   // CHECK:       [[IMMEDIATE_BOX:%.*]] = alloc_box ${ var Error }
@@ -203,7 +206,8 @@ func erasure_to_any(_ guaranteed: Error, _ immediate: Error) -> Any {
     // CHECK-NOT: destroy_value [[GUAR]]
     return guaranteed
   } else if true {
-    // CHECK:     [[IMMEDIATE:%.*]] = load [copy] [[PB]]
+    // CHECK:     [[ACCESS:%.*]] = begin_access [read] [unknown] [[PB]]
+    // CHECK:     [[IMMEDIATE:%.*]] = load [copy] [[ACCESS]]
     // CHECK:     [[FROM_VALUE:%.*]] = open_existential_box [[IMMEDIATE]]
     // CHECK:     [[TO_VALUE:%.*]] = init_existential_addr [[OUT]]
     // CHECK:     copy_addr [[FROM_VALUE]] to [initialization] [[TO_VALUE]]

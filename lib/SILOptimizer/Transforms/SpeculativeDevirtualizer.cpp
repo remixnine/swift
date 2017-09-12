@@ -61,8 +61,6 @@ static FullApplySite CloneApply(FullApplySite AI, SILBuilder &Builder) {
   switch (AI.getInstruction()->getKind()) {
   case ValueKind::ApplyInst:
     NAI = Builder.createApply(AI.getLoc(), AI.getCallee(),
-                                   AI.getSubstCalleeSILType(),
-                                   AI.getType(),
                                    AI.getSubstitutions(),
                                    Ret,
                                    cast<ApplyInst>(AI)->isNonThrowing());
@@ -70,7 +68,6 @@ static FullApplySite CloneApply(FullApplySite AI, SILBuilder &Builder) {
   case ValueKind::TryApplyInst: {
     auto *TryApplyI = cast<TryApplyInst>(AI.getInstruction());
     NAI = Builder.createTryApply(AI.getLoc(), AI.getCallee(),
-                                      AI.getSubstCalleeSILType(),
                                       AI.getSubstitutions(),
                                       Ret,
                                       TryApplyI->getNormalBB(),
@@ -153,10 +150,15 @@ static FullApplySite speculateMonomorphicTarget(FullApplySite AI,
   SILArgument *Arg =
       Continue->createPHIArgument(AI.getType(), ValueOwnershipKind::Owned);
   if (!isa<TryApplyInst>(AI)) {
-    IdenBuilder.createBranch(AI.getLoc(), Continue,
-                             ArrayRef<SILValue>(IdenAI.getInstruction()));
-    VirtBuilder.createBranch(AI.getLoc(), Continue,
-                             ArrayRef<SILValue>(VirtAI.getInstruction()));
+    if (AI.getSubstCalleeType()->isNoReturnFunction()) {
+      IdenBuilder.createUnreachable(AI.getLoc());
+      VirtBuilder.createUnreachable(AI.getLoc());
+    } else {
+      IdenBuilder.createBranch(AI.getLoc(), Continue,
+                               ArrayRef<SILValue>(IdenAI.getInstruction()));
+      VirtBuilder.createBranch(AI.getLoc(), Continue,
+                               ArrayRef<SILValue>(VirtAI.getInstruction()));
+    }
   }
 
   // Remove the old Apply instruction.
@@ -204,7 +206,7 @@ static FullApplySite speculateMonomorphicTarget(FullApplySite AI,
       Args.push_back(Arg);
     }
     FullApplySite NewVirtAI = Builder.createTryApply(VirtAI.getLoc(), VirtAI.getCallee(),
-        VirtAI.getSubstCalleeSILType(), VirtAI.getSubstitutions(),
+        VirtAI.getSubstitutions(),
         Args, NormalBB, ErrorBB);
     VirtAI.getInstruction()->eraseFromParent();
     VirtAI = NewVirtAI;
@@ -248,20 +250,20 @@ static bool isDefaultCaseKnown(ClassHierarchyAnalysis *CHA,
   if (!CD->isChildContextOf(DC))
     return false;
 
-  if (!CD->hasAccessibility())
+  if (!CD->hasAccess())
     return false;
 
   // Only consider 'private' members, unless we are in whole-module compilation.
   switch (CD->getEffectiveAccess()) {
-  case Accessibility::Open:
+  case AccessLevel::Open:
     return false;
-  case Accessibility::Public:
-  case Accessibility::Internal:
+  case AccessLevel::Public:
+  case AccessLevel::Internal:
     if (!AI.getModule().isWholeModule())
       return false;
     break;
-  case Accessibility::FilePrivate:
-  case Accessibility::Private:
+  case AccessLevel::FilePrivate:
+  case AccessLevel::Private:
     break;
   }
 
@@ -554,6 +556,13 @@ namespace {
     ~SpeculativeDevirtualization() override {}
 
     void run() override {
+
+      auto &CurFn = *getFunction();
+      // Don't perform speculative devirtualization at -Os.
+      if (CurFn.getModule().getOptions().Optimization ==
+          SILOptions::SILOptMode::OptimizeForSize)
+        return;
+
       ClassHierarchyAnalysis *CHA = PM->getAnalysis<ClassHierarchyAnalysis>();
 
       bool Changed = false;
@@ -577,7 +586,6 @@ namespace {
       }
     }
 
-    StringRef getName() override { return "Speculative Devirtualization"; }
   };
 
 } // end anonymous namespace

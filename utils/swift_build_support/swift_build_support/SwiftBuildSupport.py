@@ -19,7 +19,7 @@ except ImportError:
 
 import os
 
-import diagnostics
+from . import diagnostics
 
 
 HOME = os.environ.get("HOME", "/")
@@ -174,7 +174,8 @@ def get_preset_options(substitutions, preset_file_names, preset_name):
         sdks_to_configure = swift_sdks_opt.split("=")[1].split(";")
         tgts = []
         # Expand SDKs in to their deployment targets
-        from swift_build_support.targets import StdlibDeploymentTarget
+        from swift_build_support.swift_build_support.targets \
+            import StdlibDeploymentTarget
         for sdk in sdks_to_configure:
             if sdk == "OSX":
                 tgts += StdlibDeploymentTarget.OSX.targets

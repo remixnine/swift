@@ -16,6 +16,7 @@
 #include "swift/AST/Decl.h"
 #include "swift/AST/DiagnosticEngine.h"
 #include "swift/AST/DiagnosticsFrontend.h"
+#include "swift/AST/ExistentialLayout.h"
 #include "swift/AST/Module.h"
 #include "swift/AST/ModuleLoader.h"
 #include "swift/AST/NameLookup.h"
@@ -40,8 +41,8 @@ static void findNominalsAndOperators(
     if (!VD)
       continue;
 
-    if (VD->hasAccessibility() &&
-        VD->getFormalAccess() <= Accessibility::FilePrivate) {
+    if (VD->hasAccess() &&
+        VD->getFormalAccess() <= AccessLevel::FilePrivate) {
       continue;
     }
 
@@ -81,22 +82,28 @@ static bool declIsPrivate(const Decl *member) {
     }
   }
 
-  return VD->getFormalAccess() <= Accessibility::FilePrivate;
+  return VD->getFormalAccess() <= AccessLevel::FilePrivate;
 }
 
 static bool extendedTypeIsPrivate(TypeLoc inheritedType) {
-  if (!inheritedType.getType())
+  auto type = inheritedType.getType();
+  if (!type)
     return true;
 
-  if (!inheritedType.getType()->isExistentialType()) {
+  if (!type->isExistentialType()) {
     // Be conservative. We don't know how to deal with other extended types.
     return false;
   }
 
-  SmallVector<ProtocolDecl *, 2> protocols;
-  inheritedType.getType()->getExistentialTypeProtocols(protocols);
+  auto layout = type->getExistentialLayout();
+  assert(!layout.superclass && "Should not have a subclass existential "
+         "in the inheritance clause of an extension");
+  for (auto protoTy : layout.getProtocols()) {
+    if (!declIsPrivate(protoTy->getDecl()))
+      return false;
+  }
 
-  return std::all_of(protocols.begin(), protocols.end(), declIsPrivate);
+  return true;
 }
 
 static std::string mangleTypeAsContext(const NominalTypeDecl *type) {
@@ -142,8 +149,8 @@ bool swift::emitReferenceDependencies(DiagnosticEngine &diags,
     return true;
   }
 
-  auto escape = [](Identifier name) -> std::string {
-    return llvm::yaml::escape(name.str());
+  auto escape = [](DeclBaseName name) -> std::string {
+    return llvm::yaml::escape(name.userFacingName());
   };
 
   out << "### Swift dependencies file v0 ###\n";
@@ -167,11 +174,13 @@ bool swift::emitReferenceDependencies(DiagnosticEngine &diags,
       auto *NTD = ED->getExtendedType()->getAnyNominal();
       if (!NTD)
         break;
-      if (NTD->hasAccessibility() &&
-          NTD->getFormalAccess() <= Accessibility::FilePrivate) {
+      if (NTD->hasAccess() &&
+          NTD->getFormalAccess() <= AccessLevel::FilePrivate) {
         break;
       }
 
+      // Check if the extension is just adding members, or if it is
+      // introducing a conformance to a public protocol.
       bool justMembers = std::all_of(ED->getInherited().begin(),
                                      ED->getInherited().end(),
                                      extendedTypeIsPrivate);
@@ -206,8 +215,8 @@ bool swift::emitReferenceDependencies(DiagnosticEngine &diags,
       auto *NTD = cast<NominalTypeDecl>(D);
       if (!NTD->hasName())
         break;
-      if (NTD->hasAccessibility() &&
-          NTD->getFormalAccess() <= Accessibility::FilePrivate) {
+      if (NTD->hasAccess() &&
+          NTD->getFormalAccess() <= AccessLevel::FilePrivate) {
         break;
       }
       out << "- \"" << escape(NTD->getName()) << "\"\n";
@@ -223,11 +232,11 @@ bool swift::emitReferenceDependencies(DiagnosticEngine &diags,
       auto *VD = cast<ValueDecl>(D);
       if (!VD->hasName())
         break;
-      if (VD->hasAccessibility() &&
-          VD->getFormalAccess() <= Accessibility::FilePrivate) {
+      if (VD->hasAccess() &&
+          VD->getFormalAccess() <= AccessLevel::FilePrivate) {
         break;
       }
-      out << "- \"" << escape(VD->getName()) << "\"\n";
+      out << "- \"" << escape(VD->getBaseName()) << "\"\n";
       break;
     }
 
@@ -245,7 +254,9 @@ bool swift::emitReferenceDependencies(DiagnosticEngine &diags,
     case DeclKind::Constructor:
     case DeclKind::Destructor:
     case DeclKind::EnumElement:
-      llvm_unreachable("cannot appear at the top level of a file");
+    case DeclKind::MissingMember:
+      // These can occur in malformed ASTs.
+      break;
     }
   }
 
@@ -277,11 +288,11 @@ bool swift::emitReferenceDependencies(DiagnosticEngine &diags,
     for (auto *member : ED->getMembers()) {
       auto *VD = dyn_cast<ValueDecl>(member);
       if (!VD || !VD->hasName() ||
-          VD->getFormalAccess() <= Accessibility::FilePrivate) {
+          VD->getFormalAccess() <= AccessLevel::FilePrivate) {
         continue;
       }
       out << "- [\"" << mangledName << "\", \""
-          << escape(VD->getName()) << "\"]\n";
+          << escape(VD->getBaseName()) << "\"]\n";
     }
   }
 
@@ -292,14 +303,15 @@ bool swift::emitReferenceDependencies(DiagnosticEngine &diags,
     out << "provides-dynamic-lookup:\n";
     class NameCollector : public VisibleDeclConsumer {
     private:
-      SmallVector<Identifier, 16> names;
+      SmallVector<DeclBaseName, 16> names;
     public:
       void foundDecl(ValueDecl *VD, DeclVisibilityKind Reason) override {
-        names.push_back(VD->getName());
+        names.push_back(VD->getBaseName());
       }
-      ArrayRef<Identifier> getNames() {
+      ArrayRef<DeclBaseName> getNames() {
         llvm::array_pod_sort(names.begin(), names.end(),
-                             [](const Identifier *lhs, const Identifier *rhs) {
+                             [](const DeclBaseName *lhs,
+                                const DeclBaseName *rhs) {
           return lhs->compare(*rhs);
         });
         names.erase(std::unique(names.begin(), names.end()), names.end());
@@ -308,27 +320,27 @@ bool swift::emitReferenceDependencies(DiagnosticEngine &diags,
     };
     NameCollector collector;
     SF->lookupClassMembers({}, collector);
-    for (Identifier name : collector.getNames()) {
+    for (DeclBaseName name : collector.getNames()) {
       out << "- \"" << escape(name) << "\"\n";
     }
   }
 
   ReferencedNameTracker *tracker = SF->getReferencedNameTracker();
 
-  auto sortedByIdentifier =
-      [](const llvm::DenseMap<Identifier, bool> map) ->
-        SmallVector<std::pair<Identifier, bool>, 16> {
-    SmallVector<std::pair<Identifier, bool>, 16> pairs{map.begin(), map.end()};
+  auto sortedByName =
+      [](const llvm::DenseMap<DeclBaseName, bool> map) ->
+        SmallVector<std::pair<DeclBaseName, bool>, 16> {
+    SmallVector<std::pair<DeclBaseName,bool>, 16> pairs{map.begin(), map.end()};
     llvm::array_pod_sort(pairs.begin(), pairs.end(),
-                         [](const std::pair<Identifier, bool> *first,
-                            const std::pair<Identifier, bool> *second) -> int {
+                         [](const std::pair<DeclBaseName, bool> *first,
+                            const std::pair<DeclBaseName, bool> *second) -> int{
       return first->first.compare(second->first);
     });
     return pairs;
   };
 
   out << "depends-top-level:\n";
-  for (auto &entry : sortedByIdentifier(tracker->getTopLevelNames())) {
+  for (auto &entry : sortedByName(tracker->getTopLevelNames())) {
     assert(!entry.first.empty());
     out << "- ";
     if (!entry.second)
@@ -359,8 +371,8 @@ bool swift::emitReferenceDependencies(DiagnosticEngine &diags,
 
   for (auto &entry : sortedMembers) {
     assert(entry.first.first != nullptr);
-    if (entry.first.first->hasAccessibility() &&
-        entry.first.first->getFormalAccess() <= Accessibility::FilePrivate)
+    if (entry.first.first->hasAccess() &&
+        entry.first.first->getFormalAccess() <= AccessLevel::FilePrivate)
       continue;
 
     out << "- ";
@@ -382,8 +394,8 @@ bool swift::emitReferenceDependencies(DiagnosticEngine &diags,
       isCascading |= i->second;
     }
 
-    if (i->first.first->hasAccessibility() &&
-        i->first.first->getFormalAccess() <= Accessibility::FilePrivate)
+    if (i->first.first->hasAccess() &&
+        i->first.first->getFormalAccess() <= AccessLevel::FilePrivate)
       continue;
 
     out << "- ";
@@ -395,7 +407,7 @@ bool swift::emitReferenceDependencies(DiagnosticEngine &diags,
   }
 
   out << "depends-dynamic-lookup:\n";
-  for (auto &entry : sortedByIdentifier(tracker->getDynamicLookupNames())) {
+  for (auto &entry : sortedByName(tracker->getDynamicLookupNames())) {
     assert(!entry.first.empty());
     out << "- ";
     if (!entry.second)

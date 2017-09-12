@@ -682,7 +682,7 @@ bool CSE::processOpenExistentialRef(SILInstruction *Inst, ValueBase *V,
   }
   // Now process candidates.
   // TODO: Move it to CSE instance to avoid recreating it every time?
-  SILOpenedArchetypesTracker OpenedArchetypesTracker(*Inst->getFunction());
+  SILOpenedArchetypesTracker OpenedArchetypesTracker(Inst->getFunction());
   // Register the new archetype to be used.
   OpenedArchetypesTracker.registerOpenedArchetypes(dyn_cast<SILInstruction>(V));
   // Use a cloner. It makes copying the instruction and remapping of
@@ -822,10 +822,7 @@ bool CSE::canHandle(SILInstruction *Inst) {
         case ArrayCallKind::kGetCapacity:
         case ArrayCallKind::kCheckIndex:
         case ArrayCallKind::kCheckSubscript:
-          if (SemCall.hasGuaranteedSelf()) {
-            return true;
-          }
-          return false;
+          return SemCall.hasGuaranteedSelf();
         default:
           return false;
       }
@@ -996,7 +993,7 @@ static bool tryToCSEOpenExtCall(OpenExistentialAddrInst *From,
 
   SILBuilder Builder(FromAI);
   // Make archetypes used by the ToAI available to the builder.
-  SILOpenedArchetypesTracker OpenedArchetypesTracker(*FromAI->getFunction());
+  SILOpenedArchetypesTracker OpenedArchetypesTracker(FromAI->getFunction());
   OpenedArchetypesTracker.registerUsedOpenedArchetypes(ToAI);
   Builder.setOpenedArchetypesTracker(&OpenedArchetypesTracker);
 
@@ -1012,12 +1009,7 @@ static bool tryToCSEOpenExtCall(OpenExistentialAddrInst *From,
       Args.push_back(Op == From ? To : Op);
   }
 
-  auto FnTy = ToAI->getSubstCalleeSILType();
-  SILFunctionConventions fnConv(FnTy.castTo<SILFunctionType>(),
-                                Builder.getModule());
-  auto ResTy = fnConv.getSILResultType();
-
-  ApplyInst *NAI = Builder.createApply(ToAI->getLoc(), ToWMI, FnTy, ResTy,
+  ApplyInst *NAI = Builder.createApply(ToAI->getLoc(), ToWMI,
                                        ToAI->getSubstitutions(), Args,
                                        ToAI->isNonThrowing());
   FromAI->replaceAllUsesWith(NAI);
@@ -1156,10 +1148,6 @@ class SILCSE : public SILFunctionTransform {
     }
   }
 
-  StringRef getName() override {
-    return RunsOnHighLevelSil ? "High-level CSE" : "CSE";
-  }
-  
 public:
   SILCSE(bool RunsOnHighLevelSil) : RunsOnHighLevelSil(RunsOnHighLevelSil) {}
 };

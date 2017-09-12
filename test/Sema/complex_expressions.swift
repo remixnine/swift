@@ -1,4 +1,4 @@
-// RUN: %target-typecheck-verify-swift
+// RUN: %target-typecheck-verify-swift -propagate-constraints
 
 // SR-139:
 // Infinite recursion parsing bitwise operators
@@ -93,6 +93,7 @@ func sr1794(pt: P, p0: P, p1: P) -> Bool {
 let v1 = (1 - 2 / 3 * 6) as UInt
 let v2 = (([1 + 2 * 3, 4, 5])) as [UInt]
 let v3 = ["hello": 1 + 2, "world": 3 + 4 + 5 * 3] as Dictionary<String, UInt>
+// expected-warning@-1 {{mixed-type arithmetics}}
 let v4 = [1 + 2 + 3, 4] as [UInt32] + [2 * 3] as [UInt32]
 let v5 = ([1 + 2 + 3, 4] as [UInt32]) + ([2 * 3] as [UInt32])
 let v6 = [1 + 2 + 3, 4] as Set<UInt32>
@@ -115,3 +116,26 @@ let sr3668Dict2: [Int: (Int, Int) -> Bool] =
      8: { $0 != $1 },  9: { $0 != $1 }, 10: { $0 != $1 }, 11: { $0 != $1 },
     12: { $0 != $1 }, 13: { $0 != $1 }, 14: { $0 != $1 }, 15: { $0 != $1 },
     16: { $0 != $1 }, 17: { $0 != $1 }, 18: { $0 != $1 }, 19: { $0 != $1 } ]
+
+// rdar://problem/32034560 - type-checker hangs trying to solve expression
+struct R32034560 {
+  private var R32034560: Array<Array<UInt32>>
+  private func foo(x: UInt32) -> UInt32 {
+    return ((self.R32034560[0][Int(x >> 24) & 0xFF] &+ self.R32034560[1][Int(x >> 16) & 0xFF]) ^ self.R32034560[2][Int(x >> 8) & 0xFF]) &+ self.R32034560[3][Int(x & 0xFF)]
+  }
+}
+
+// rdar://problem/33806601
+
+class P_33806601 {
+    var x : Int = 0
+    var y : Int = 1
+}
+
+func foo33806601<T>(_ n: T) -> T where T : FloatingPoint { fatalError() }
+func foo33806601(_ n: Double) -> Double { return 0.0 }
+
+let _: (P_33806601, P_33806601) -> Double = {
+  (p : P_33806601, s : P_33806601)  -> Double in
+    foo33806601(Double((p.x - s.x) * (p.x - s.x) + (p.y - s.y) * (p.y - s.y)))
+}

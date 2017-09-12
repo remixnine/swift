@@ -637,9 +637,7 @@ void FunctionSignatureTransform::createFunctionSignatureOptimizedFunction() {
   // Create the optimized function !
   SILModule &M = F->getModule();
   std::string Name = createOptimizedSILFunctionName();
-  SILLinkage linkage = F->getLinkage();
-  if (isAvailableExternally(linkage))
-    linkage = SILLinkage::Shared;
+  SILLinkage linkage = getSpecializedLinkage(F, F->getLinkage());
 
   DEBUG(llvm::dbgs() << "  -> create specialized function " << Name << "\n");
 
@@ -654,7 +652,7 @@ void FunctionSignatureTransform::createFunctionSignatureOptimizedFunction() {
   NewF = M.createFunction(
       linkage, Name, NewFTy, NewFGenericEnv, F->getLocation(), F->isBare(),
       F->isTransparent(), F->isSerialized(), F->isThunk(),
-      F->getClassVisibility(), F->getInlineStrategy(), F->getEffectsKind(),
+      F->getClassSubclassScope(), F->getInlineStrategy(), F->getEffectsKind(),
       nullptr, F->getDebugScope());
   if (F->hasUnqualifiedOwnership()) {
     NewF->setUnqualifiedOwnership();
@@ -736,16 +734,13 @@ void FunctionSignatureTransform::createFunctionSignatureOptimizedFunction() {
         SILType::getPrimitiveObjectType(FunctionTy->getErrorResult().getType());
     auto *ErrorArg =
         ErrorBlock->createPHIArgument(Error, ValueOwnershipKind::Owned);
-    Builder.createTryApply(Loc, FRI, SubstCalleeSILType, Subs,
-                           ThunkArgs, NormalBlock, ErrorBlock);
+    Builder.createTryApply(Loc, FRI, Subs, ThunkArgs, NormalBlock, ErrorBlock);
 
     Builder.setInsertionPoint(ErrorBlock);
     Builder.createThrow(Loc, ErrorArg);
     Builder.setInsertionPoint(NormalBlock);
   } else {
-    ReturnValue = Builder.createApply(Loc, FRI, SubstCalleeSILType, ResultType,
-                                      Subs, ThunkArgs,
-                                      false);
+    ReturnValue = Builder.createApply(Loc, FRI, Subs, ThunkArgs, false);
   }
 
   // Set up the return results.
@@ -1145,6 +1140,11 @@ public:
   void run() override {
     auto *F = getFunction();
 
+    // Don't run function signature optimizations at -Os.
+    if (F->getModule().getOptions().Optimization ==
+        SILOptions::SILOptMode::OptimizeForSize)
+      return;
+
     // Don't optimize callees that should not be optimized.
     if (!F->shouldOptimize())
       return;
@@ -1234,7 +1234,6 @@ public:
     }
   }
 
-  StringRef getName() override { return "Function Signature Optimization"; }
 };
 
 } // end anonymous namespace

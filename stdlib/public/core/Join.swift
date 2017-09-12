@@ -27,7 +27,7 @@ public struct JoinedIterator<Base : IteratorProtocol> : IteratorProtocol
   ///
   /// - Complexity: O(`separator.count`).
   public init<Separator : Sequence>(base: Base, separator: Separator)
-    where Separator.Iterator.Element == Base.Element.Iterator.Element {
+    where Separator.Element == Base.Element.Element {
     self._base = base
     self._separatorData = ContiguousArray(separator)
   }
@@ -36,7 +36,7 @@ public struct JoinedIterator<Base : IteratorProtocol> : IteratorProtocol
   /// exists.
   ///
   /// Once `nil` has been returned, all subsequent calls return `nil`.
-  public mutating func next() -> Base.Element.Iterator.Element? {
+  public mutating func next() -> Base.Element.Element? {
     while true {
       switch _state {
       case .start:
@@ -79,23 +79,23 @@ public struct JoinedIterator<Base : IteratorProtocol> : IteratorProtocol
 
   internal var _base: Base
   internal var _inner: Base.Element.Iterator?
-  internal var _separatorData: ContiguousArray<Base.Element.Iterator.Element>
+  internal var _separatorData: ContiguousArray<Base.Element.Element>
   internal var _separator:
-    ContiguousArray<Base.Element.Iterator.Element>.Iterator?
+    ContiguousArray<Base.Element.Element>.Iterator?
   internal var _state: _JoinIteratorState = .start
 }
 
 /// A sequence that presents the elements of a base sequence of sequences
 /// concatenated using a given separator.
 public struct JoinedSequence<Base : Sequence> : Sequence
-  where Base.Iterator.Element : Sequence {
+  where Base.Element : Sequence {
 
   /// Creates a sequence that presents the elements of `base` sequences
   /// concatenated using `separator`.
   ///
   /// - Complexity: O(`separator.count`).
   public init<Separator : Sequence>(base: Base, separator: Separator)
-    where Separator.Iterator.Element == Base.Iterator.Element.Iterator.Element {
+    where Separator.Element == Base.Element.Element {
     self._base = base
     self._separator = ContiguousArray(separator)
   }
@@ -110,8 +110,8 @@ public struct JoinedSequence<Base : Sequence> : Sequence
   }
 
   public func _copyToContiguousArray()
-    -> ContiguousArray<Base.Iterator.Element.Iterator.Element> {
-    var result = ContiguousArray<Iterator.Element>()
+    -> ContiguousArray<Base.Element.Element> {
+    var result = ContiguousArray<Element>()
     let separatorSize: Int = numericCast(_separator.count)
 
     let reservation = _base._preprocessingPass {
@@ -148,10 +148,10 @@ public struct JoinedSequence<Base : Sequence> : Sequence
 
   internal var _base: Base
   internal var _separator:
-    ContiguousArray<Base.Iterator.Element.Iterator.Element>
+    ContiguousArray<Base.Element.Element>
 }
 
-extension Sequence where Iterator.Element : Sequence {
+extension Sequence where Element : Sequence {
   /// Returns the concatenated elements of this sequence of sequences,
   /// inserting the given separator between each element.
   ///
@@ -166,33 +166,10 @@ extension Sequence where Iterator.Element : Sequence {
   /// - Parameter separator: A sequence to insert between each of this
   ///   sequence's elements.
   /// - Returns: The joined sequence of elements.
-  ///
-  /// - SeeAlso: `joined()`
   public func joined<Separator : Sequence>(
     separator: Separator
   ) -> JoinedSequence<Self>
-    where Separator.Iterator.Element == Iterator.Element.Iterator.Element {
+    where Separator.Element == Element.Element {
     return JoinedSequence(base: self, separator: separator)
-  }
-}
-
-@available(*, unavailable, renamed: "JoinedIterator")
-public struct JoinGenerator<Base : IteratorProtocol>
-  where Base.Element : Sequence {}
-
-extension JoinedSequence {
-  @available(*, unavailable, renamed: "makeIterator()")
-  public func generate() -> JoinedIterator<Base.Iterator> {
-    Builtin.unreachable()
-  }
-}
-
-extension Sequence where Iterator.Element : Sequence {
-  @available(*, unavailable, renamed: "joined(separator:)")
-  public func joinWithSeparator<Separator : Sequence>(
-    _ separator: Separator
-  ) -> JoinedSequence<Self>
-    where Separator.Iterator.Element == Iterator.Element.Iterator.Element {
-    Builtin.unreachable()
   }
 }

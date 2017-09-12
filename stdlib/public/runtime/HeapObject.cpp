@@ -18,6 +18,7 @@
 #include "swift/Runtime/HeapObject.h"
 #include "swift/Runtime/Heap.h"
 #include "swift/Runtime/Metadata.h"
+#include "swift/Runtime/Once.h"
 #include "swift/ABI/System.h"
 #include "llvm/Support/Compiler.h"
 #include "llvm/Support/MathExtras.h"
@@ -31,6 +32,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <thread>
+#include "../SwiftShims/GlobalObjects.h"
 #include "../SwiftShims/RuntimeShims.h"
 #if SWIFT_OBJC_INTEROP
 # include <objc/NSObject.h>
@@ -91,22 +93,50 @@ swift::swift_initStackObject(HeapMetadata const *metadata,
   object->refCounts.initForNotFreeing();
 
   return object;
+}
 
+struct InitStaticObjectContext {
+  HeapObject *object;
+  HeapMetadata const *metadata;
+};
+
+// Callback for swift_once.
+static void initStaticObjectWithContext(void *OpaqueCtx) {
+  InitStaticObjectContext *Ctx = (InitStaticObjectContext *)OpaqueCtx;
+  Ctx->object->metadata = Ctx->metadata;
+  Ctx->object->refCounts.initForNotFreeing();
+}
+
+// TODO: We could generate inline code for the fast-path, i.e. the metadata
+// pointer is already set. That would be a performance/codesize tradeoff.
+HeapObject *
+swift::swift_initStaticObject(HeapMetadata const *metadata,
+                              HeapObject *object) {
+  // The token is located at a negative offset from the object header.
+  swift_once_t *token = ((swift_once_t *)object) - 1;
+
+  // We have to initialize the header atomically. Otherwise we could reset the
+  // refcount to 1 while another thread already incremented it - and would
+  // decrement it to 0 afterwards.
+  InitStaticObjectContext Ctx = { object, metadata };
+  swift_once(token, initStaticObjectWithContext, &Ctx);
+
+  return object;
 }
 
 void
 swift::swift_verifyEndOfLifetime(HeapObject *object) {
   if (object->refCounts.getCount() != 0)
     swift::fatalError(/* flags = */ 0,
-                      "fatal error: stack object escaped\n");
+                      "Fatal error: Stack object escaped\n");
   
   if (object->refCounts.getUnownedCount() != 1)
     swift::fatalError(/* flags = */ 0,
-                      "fatal error: unowned reference to stack object\n");
+                      "Fatal error: Unowned reference to stack object\n");
   
   if (object->refCounts.getWeakCount() != 0)
     swift::fatalError(/* flags = */ 0,
-                      "fatal error: weak reference to stack object\n");
+                      "Fatal error: Weak reference to stack object\n");
 }
 
 /// \brief Allocate a reference-counted object on the heap that
@@ -225,6 +255,30 @@ OpaqueValue *swift::swift_projectBox(HeapObject *o) {
     return nullptr;
   auto metadata = static_cast<const GenericBoxHeapMetadata *>(o->metadata);
   return metadata->project(o);
+}
+
+namespace { // Begin anonymous namespace.
+
+struct _SwiftEmptyBoxStorage {
+  HeapObject header;
+};
+
+swift::HeapLocalVariableMetadata _emptyBoxStorageMetadata;
+
+/// The singleton empty box storage object.
+_SwiftEmptyBoxStorage _EmptyBoxStorage = {
+ // HeapObject header;
+  {
+    &_emptyBoxStorageMetadata,
+  }
+};
+
+} // End anonymous namespace.
+
+HeapObject *swift::swift_allocEmptyBox() {
+  auto heapObject = reinterpret_cast<HeapObject*>(&_EmptyBoxStorage);
+  SWIFT_RT_ENTRY_CALL(swift_retain)(heapObject);
+  return heapObject;
 }
 
 // Forward-declare this, but define it after swift_release.
@@ -627,7 +681,7 @@ void swift_deallocPartialClassInstance(HeapObject *object,
     if (classMetadata->isPureObjC()) {
       // Set the class to the pure Objective-C superclass, so that when dealloc
       // runs, it starts at that superclass.
-      object_setClass((id)object, (Class)classMetadata);
+      object_setClass((id)object, class_const_cast(classMetadata));
 
       // Release the object.
       objc_release((id)object);
@@ -652,7 +706,7 @@ void swift_deallocPartialClassInstance(HeapObject *object,
 
     // Set the class to the pure Objective-C superclass, so that when dealloc
     // runs, it starts at that superclass.
-    object_setClass((id)object, (Class)classMetadata);
+    object_setClass((id)object, class_const_cast(classMetadata));
 
     // Release the object.
     objc_release((id)object);

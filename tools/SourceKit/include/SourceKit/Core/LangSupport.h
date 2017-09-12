@@ -141,6 +141,7 @@ struct CustomCompletionInfo {
     Stmt = 1 << 0,
     Expr = 1 << 1,
     Type = 1 << 2,
+    ForEachSequence = 1 << 3,
   };
   swift::OptionSet<Context> Contexts;
 };
@@ -153,6 +154,7 @@ struct FilterRule {
     Literal,
     CustomCompletion,
     Identifier,
+    Description,
   };
   Kind kind;
   bool hide;
@@ -209,6 +211,8 @@ public:
                                          unsigned NameLength,
                                          unsigned BodyOffset,
                                          unsigned BodyLength,
+                                         unsigned DocOffset,
+                                         unsigned DocLength,
                                          StringRef DisplayName,
                                          StringRef TypeName,
                                          StringRef RuntimeName,
@@ -247,7 +251,13 @@ public:
   virtual bool valueForOption(UIdent Key, StringRef &Val) = 0;
 };
 
-struct CursorInfo {
+struct RefactoringInfo {
+  UIdent Kind;
+  StringRef KindName;
+  StringRef UnavailableReason;
+};
+
+struct CursorInfoData {
   bool IsCancelled = false;
   UIdent Kind;
   StringRef Name;
@@ -283,7 +293,7 @@ struct CursorInfo {
   /// All groups of the module name under cursor.
   ArrayRef<StringRef> ModuleGroupArray;
   /// All available actions on the code under cursor.
-  ArrayRef<StringRef> AvailableActions;
+  ArrayRef<RefactoringInfo> AvailableActions;
   bool IsSystem = false;
   llvm::Optional<unsigned> ParentNameOffset;
 };
@@ -300,6 +310,21 @@ struct NameTranslatingInfo {
   UIdent NameKind;
   StringRef BaseName;
   std::vector<StringRef> ArgNames;
+  bool IsZeroArgSelector = false;
+};
+
+enum class SemanticRefactoringKind {
+  None,
+#define SEMANTIC_REFACTORING(KIND, NAME, ID) KIND,
+#include "swift/IDE/RefactoringKinds.def"
+};
+
+struct SemanticRefactoringInfo {
+  SemanticRefactoringKind Kind;
+  unsigned Line;
+  unsigned Column;
+  unsigned Length;
+  StringRef PreferredName;
 };
 
 struct RelatedIdentsInfo {
@@ -328,6 +353,7 @@ struct DocGenericParam {
 struct DocEntityInfo {
   UIdent Kind;
   llvm::SmallString<32> Name;
+  llvm::SmallString<32> SubModuleName;
   llvm::SmallString<32> Argument;
   llvm::SmallString<64> USR;
   llvm::SmallString<64> OriginalUSR;
@@ -355,6 +381,70 @@ struct AvailableAttrInfo {
   llvm::Optional<clang::VersionTuple> Deprecated;
   llvm::Optional<clang::VersionTuple> Obsoleted;
 };
+
+struct NoteRegion {
+  UIdent Kind;
+  unsigned StartLine;
+  unsigned StartColumn;
+  unsigned EndLine;
+  unsigned EndColumn;
+  llvm::Optional<unsigned> ArgIndex;
+};
+
+struct Edit {
+  unsigned StartLine;
+  unsigned StartColumn;
+  unsigned EndLine;
+  unsigned EndColumn;
+  std::string NewText;
+  SmallVector<NoteRegion, 2> RegionsWithNote;
+};
+
+struct CategorizedEdits {
+  UIdent Category;
+  ArrayRef<Edit> Edits;
+};
+
+struct RenameRangeDetail {
+  unsigned StartLine;
+  unsigned StartColumn;
+  unsigned EndLine;
+  unsigned EndColumn;
+  UIdent Kind;
+  Optional<unsigned> ArgIndex;
+};
+
+struct CategorizedRenameRanges {
+  UIdent Category;
+  std::vector<RenameRangeDetail> Ranges;
+};
+
+enum class RenameType {
+  Unknown,
+  Definition,
+  Reference,
+  Call
+};
+
+struct RenameLocation {
+  unsigned Line;
+  unsigned Column;
+  RenameType Type;
+};
+
+struct RenameLocations {
+  StringRef OldName;
+  StringRef NewName;
+  const bool IsFunctionLike;
+  const bool IsNonProtocolType;
+  std::vector<RenameLocation> LineColumnLocs;
+};
+
+typedef std::function<void(ArrayRef<CategorizedEdits> Edits,
+                           StringRef Error)> CategorizedEditsReceiver;
+typedef std::function<void(ArrayRef<CategorizedRenameRanges> Edits,
+                           StringRef Error)>
+    CategorizedRenameRangesReceiver;
 
 class DocInfoConsumer {
   virtual void anchor();
@@ -442,7 +532,9 @@ public:
                                          StringRef Name,
                                          StringRef HeaderName,
                                          ArrayRef<const char *> Args,
-                                         bool SynthesizedExtensions) = 0;
+                                         bool UsingSwiftArgs,
+                                         bool SynthesizedExtensions,
+                                         Optional<unsigned> swiftVersion) = 0;
 
   virtual void editorOpenSwiftSourceInterface(StringRef Name,
                                               StringRef SourceName,
@@ -473,8 +565,9 @@ public:
 
   virtual void getCursorInfo(StringRef Filename, unsigned Offset,
                              unsigned Length, bool Actionables,
+                             bool CancelOnSubsequentRequest,
                              ArrayRef<const char *> Args,
-                          std::function<void(const CursorInfo &)> Receiver) = 0;
+                      std::function<void(const CursorInfoData &)> Receiver) = 0;
 
 
   virtual void getNameInfo(StringRef Filename, unsigned Offset,
@@ -483,16 +576,19 @@ public:
                 std::function<void(const NameTranslatingInfo &)> Receiver) = 0;
 
   virtual void getRangeInfo(StringRef Filename, unsigned Offset, unsigned Length,
+                            bool CancelOnSubsequentRequest,
                             ArrayRef<const char *> Args,
                             std::function<void(const RangeInfo&)> Receiver) = 0;
 
   virtual void
   getCursorInfoFromUSR(StringRef Filename, StringRef USR,
+                       bool CancelOnSubsequentRequest,
                        ArrayRef<const char *> Args,
-                       std::function<void(const CursorInfo &)> Receiver) = 0;
+                     std::function<void(const CursorInfoData &)> Receiver) = 0;
 
   virtual void findRelatedIdentifiersInFile(StringRef Filename,
                                             unsigned Offset,
+                                            bool CancelOnSubsequentRequest,
                                             ArrayRef<const char *> Args,
                    std::function<void(const RelatedIdentsInfo &)> Receiver) = 0;
 
@@ -507,6 +603,24 @@ public:
                                 ArrayRef<const char *> Args,
                                 std::function<void(ArrayRef<StringRef>,
                                                    StringRef Error)> Receiver) = 0;
+
+  virtual void syntacticRename(llvm::MemoryBuffer *InputBuf,
+                               ArrayRef<RenameLocations> RenameLocations,
+                               ArrayRef<const char*> Args,
+                               CategorizedEditsReceiver Receiver) = 0;
+
+  virtual void findRenameRanges(llvm::MemoryBuffer *InputBuf,
+                                ArrayRef<RenameLocations> RenameLocations,
+                                ArrayRef<const char *> Args,
+                                CategorizedRenameRangesReceiver Receiver) = 0;
+  virtual void
+  findLocalRenameRanges(StringRef Filename, unsigned Line, unsigned Column,
+                        unsigned Length, ArrayRef<const char *> Args,
+                        CategorizedRenameRangesReceiver Receiver) = 0;
+
+  virtual void semanticRefactoring(StringRef Filename, SemanticRefactoringInfo Info,
+                                   ArrayRef<const char*> Args,
+                                   CategorizedEditsReceiver Receiver) = 0;
 
   virtual void getDocInfo(llvm::MemoryBuffer *InputBuf,
                           StringRef ModuleName,

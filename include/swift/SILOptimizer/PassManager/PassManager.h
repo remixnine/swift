@@ -99,7 +99,7 @@ class SILPassManager {
 
 
   /// The IRGen SIL passes. These have to be dynamically added by IRGen.
-  llvm::DenseMap<unsigned, SILFunctionTransform *> IRGenPasses;
+  llvm::DenseMap<unsigned, SILTransform *> IRGenPasses;
 
 public:
   /// C'tor. It creates and registers all analysis passes, which are defined
@@ -118,7 +118,7 @@ public:
   template<typename T>
   T *getAnalysis() {
     for (SILAnalysis *A : Analysis)
-      if (T *R = llvm::dyn_cast<T>(A))
+      if (auto *R = llvm::dyn_cast<T>(A))
         return R;
 
     llvm_unreachable("Unable to find analysis for requested type.");
@@ -211,8 +211,15 @@ public:
   /// owned by the pass manager. Analysis passes will be kept.
   void resetAndRemoveTransformations();
 
-  // Sets the name of the current optimization stage used for debugging.
+  /// \brief Set the name of the current optimization stage.
+  ///
+  /// This is useful for debugging.
   void setStageName(llvm::StringRef NextStage = "");
+
+  /// \brief Get the name of the current optimization stage.
+  ///
+  /// This is useful for debugging.
+  StringRef getStageName() const;
 
   /// D'tor.
   ~SILPassManager();
@@ -247,7 +254,7 @@ public:
     }
   }
 
-  void registerIRGenPass(PassKind Kind, SILFunctionTransform *Transform) {
+  void registerIRGenPass(PassKind Kind, SILTransform *Transform) {
     assert(IRGenPasses.find(unsigned(Kind)) == IRGenPasses.end() &&
            "Pass already registered");
     assert(

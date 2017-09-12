@@ -92,6 +92,9 @@ enum class ClassFlags : uint32_t {
 
   /// Does this class use Swift 1.0 refcounting?
   UsesSwift1Refcounting = 0x2,
+
+  /// Has this class a custom name, specified with the @objc attribute?
+  HasCustomObjCName = 0x4
 };
 inline bool operator&(ClassFlags a, ClassFlags b) {
   return (uint32_t(a) & uint32_t(b)) != 0;
@@ -102,6 +105,62 @@ inline ClassFlags operator|(ClassFlags a, ClassFlags b) {
 inline ClassFlags &operator|=(ClassFlags &a, ClassFlags b) {
   return a = (a | b);
 }
+
+/// Flags that go in a MethodDescriptor structure.
+class MethodDescriptorFlags {
+public:
+  typedef uint32_t int_type;
+  enum class Kind {
+    Method,
+    Init,
+    Getter,
+    Setter,
+    MaterializeForSet,
+  };
+
+private:
+  enum : int_type {
+    KindMask = 0x0F,                // 16 kinds should be enough for anybody
+    IsInstanceMask = 0x10,
+    IsDynamicMask = 0x20,
+  };
+
+  int_type Value;
+
+public:
+  MethodDescriptorFlags(Kind kind) : Value(unsigned(kind)) {}
+
+  MethodDescriptorFlags withIsInstance(bool isInstance) const {
+    auto copy = *this;
+    if (isInstance) {
+      copy.Value |= IsInstanceMask;
+    } else {
+      copy.Value &= ~IsInstanceMask;
+    }
+    return copy;
+  }
+
+  MethodDescriptorFlags withIsDynamic(bool isDynamic) const {
+    auto copy = *this;
+    if (isDynamic)
+      copy.Value |= IsDynamicMask;
+    else
+      copy.Value &= ~IsDynamicMask;
+    return copy;
+  }
+
+  Kind getKind() const { return Kind(Value & KindMask); }
+
+  /// Is the method marked 'dynamic'?
+  bool isDynamic() const { return Value & IsDynamicMask; }
+
+  /// Is the method an instance member?
+  ///
+  /// Note that 'init' is not considered an instance member.
+  bool isInstance() const { return Value & IsInstanceMask; }
+
+  int_type getIntValue() const { return Value; }
+};
 
 enum : unsigned {
   /// Number of words reserved in generic metadata patterns.
@@ -226,10 +285,8 @@ enum class SpecialProtocol: uint8_t {
   ///
   /// This must be 0 for ABI compatibility with Objective-C protocol_t records.
   None = 0,
-  /// The AnyObject protocol.
-  AnyObject = 1,
   /// The Error protocol.
-  Error = 2,
+  Error = 1,
 };
 
 /// Identifiers for protocol method dispatch strategies.
@@ -244,10 +301,6 @@ enum class ProtocolDispatchStrategy: uint8_t {
   /// To invoke methods of this protocol, a pointer to a protocol witness table
   /// corresponding to the protocol conformance must be available.
   Swift = 1,
-  
-  /// The protocol guarantees that it has no methods to dispatch. It requires
-  /// neither Objective-C metadata nor a witness table.
-  Empty = 2,
 };
 
 /// Flags in a generic nominal type descriptor.
@@ -256,6 +309,7 @@ class GenericParameterDescriptorFlags {
   enum : int_type {
     HasParent        = 0x01,
     HasGenericParent = 0x02,
+    HasVTable        = 0x04,
   };
   int_type Data;
   
@@ -273,6 +327,11 @@ public:
                                              : (Data & ~HasGenericParent));
   }
 
+  constexpr GenericParameterDescriptorFlags withHasVTable(bool b) const {
+    return GenericParameterDescriptorFlags(b ? (Data | HasVTable)
+                                             : (Data & ~HasVTable));
+  }
+
   /// Does this type have a lexical parent type?
   ///
   /// For class metadata, if this is true, the storage for the parent type
@@ -288,6 +347,13 @@ public:
   /// the generic metadata access function.
   bool hasGenericParent() const {
     return Data & HasGenericParent;
+  }
+
+  /// If this type is a class, does it have a vtable?  If so, the number
+  /// of vtable entries immediately follows the generic requirement
+  /// descriptor.
+  bool hasVTable() const {
+    return Data & HasVTable;
   }
 
   int_type getIntValue() const {
@@ -375,7 +441,6 @@ public:
   static bool needsWitnessTable(ProtocolDispatchStrategy strategy) {
     switch (strategy) {
     case ProtocolDispatchStrategy::ObjC:
-    case ProtocolDispatchStrategy::Empty:
       return false;
     case ProtocolDispatchStrategy::Swift:
       return true;
@@ -398,19 +463,66 @@ public:
   }
 };
 
+/// Flags that go in a ProtocolRequirement structure.
+class ProtocolRequirementFlags {
+public:
+  typedef uint32_t int_type;
+  enum class Kind {
+    BaseProtocol,
+    Method,
+    Init,
+    Getter,
+    Setter,
+    MaterializeForSet,
+    AssociatedTypeAccessFunction,
+    AssociatedConformanceAccessFunction,
+  };
+
+private:
+  enum : int_type {
+    KindMask = 0x0F,                // 16 kinds should be enough for anybody
+    IsInstanceMask = 0x10,
+  };
+
+  int_type Value;
+
+public:
+  ProtocolRequirementFlags(Kind kind) : Value(unsigned(kind)) {}
+
+  ProtocolRequirementFlags withIsInstance(bool isInstance) const {
+    auto copy = *this;
+    if (isInstance) {
+      copy.Value |= IsInstanceMask;
+    } else {
+      copy.Value &= ~IsInstanceMask;
+    }
+    return copy;
+  }
+
+  Kind getKind() const { return Kind(Value & KindMask); }
+
+  /// Is the method an instance member?
+  ///
+  /// Note that 'init' is not considered an instance member.
+  bool isInstance() const { return Value & IsInstanceMask; }
+
+  int_type getIntValue() const { return Value; }
+};
+
 /// Flags in an existential type metadata record.
 class ExistentialTypeFlags {
   typedef size_t int_type;
   enum : int_type {
     NumWitnessTablesMask  = 0x00FFFFFFU,
     ClassConstraintMask   = 0x80000000U,
-    SpecialProtocolMask   = 0x7F000000U,
+    HasSuperclassMask     = 0x40000000U,
+    SpecialProtocolMask   = 0x3F000000U,
     SpecialProtocolShift  = 24U,
   };
   int_type Data;
 
-  constexpr ExistentialTypeFlags(int_type Data) : Data(Data) {}
 public:
+  constexpr ExistentialTypeFlags(int_type Data) : Data(Data) {}
   constexpr ExistentialTypeFlags() : Data(0) {}
   constexpr ExistentialTypeFlags withNumWitnessTables(unsigned numTables) const {
     return ExistentialTypeFlags((Data & ~NumWitnessTablesMask) | numTables);
@@ -419,6 +531,11 @@ public:
   withClassConstraint(ProtocolClassConstraint c) const {
     return ExistentialTypeFlags((Data & ~ClassConstraintMask)
                                   | (bool(c) ? ClassConstraintMask : 0));
+  }
+  constexpr ExistentialTypeFlags
+  withHasSuperclass(bool hasSuperclass) const {
+    return ExistentialTypeFlags((Data & ~HasSuperclassMask)
+                                  | (hasSuperclass ? HasSuperclassMask : 0));
   }
   constexpr ExistentialTypeFlags
   withSpecialProtocol(SpecialProtocol sp) const {
@@ -433,7 +550,11 @@ public:
   ProtocolClassConstraint getClassConstraint() const {
     return ProtocolClassConstraint(bool(Data & ClassConstraintMask));
   }
-  
+
+  bool hasSuperclassConstraint() const {
+    return bool(Data & HasSuperclassMask);
+  }
+
   /// Return whether this existential type represents an uncomposed special
   /// protocol.
   SpecialProtocol getSpecialProtocol() const {
@@ -563,6 +684,33 @@ public:
   }
 };
 
+/// Flags for exclusivity-checking operations.
+enum class ExclusivityFlags : uintptr_t {
+  Read             = 0x0,
+  Modify           = 0x1,
+  // Leave space for other actions.
+  // Don't rely on ActionMask in stable ABI.
+  ActionMask       = 0x1,
+
+  // Downgrade exclusivity failures to a warning.
+  WarningOnly      = 0x10
+};
+static inline ExclusivityFlags operator|(ExclusivityFlags lhs,
+                                         ExclusivityFlags rhs) {
+  return ExclusivityFlags(uintptr_t(lhs) | uintptr_t(rhs));
 }
+static inline ExclusivityFlags &operator|=(ExclusivityFlags &lhs,
+                                           ExclusivityFlags rhs) {
+  return (lhs = (lhs | rhs));
+}
+static inline ExclusivityFlags getAccessAction(ExclusivityFlags flags) {
+  return ExclusivityFlags(uintptr_t(flags)
+                        & uintptr_t(ExclusivityFlags::ActionMask));
+}
+static inline bool isWarningOnly(ExclusivityFlags flags) {
+  return uintptr_t(flags) & uintptr_t(ExclusivityFlags::WarningOnly);
+}
+
+} // end namespace swift
 
 #endif /* SWIFT_ABI_METADATAVALUES_H */

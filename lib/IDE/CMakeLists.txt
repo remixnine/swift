@@ -3,6 +3,7 @@ add_swift_library(swiftIDE STATIC
   CodeCompletionCache.cpp
   CommentConversion.cpp
   Formatting.cpp
+  Refactoring.cpp
   ModuleInterfacePrinting.cpp
   TypeReconstruction.cpp
   REPLCodeCompletion.cpp
@@ -10,6 +11,9 @@ add_swift_library(swiftIDE STATIC
   SyntaxModel.cpp
   Utils.cpp
   IDETypeChecking.cpp
+  APIDigesterData.cpp
+  DEPENDS
+    swift-syntax-generated-headers
   LINK_LIBRARIES
     swiftFrontend
     swiftClangImporter

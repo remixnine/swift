@@ -23,10 +23,11 @@
 #include "llvm/ADT/ImmutableSet.h"
 #include "llvm/ADT/Statistic.h"
 #include "llvm/Support/Debug.h"
+
 using namespace swift;
 
-typedef llvm::DenseSet<SILFunction*> DenseFunctionSet;
-typedef llvm::ImmutableSet<SILFunction*> ImmutableFunctionSet;
+using DenseFunctionSet = llvm::DenseSet<SILFunction *>;
+using ImmutableFunctionSet = llvm::ImmutableSet<SILFunction *>;
 
 STATISTIC(NumMandatoryInlines,
           "Number of function application sites inlined by the mandatory "
@@ -103,6 +104,65 @@ static void fixupReferenceCounts(SILBasicBlock::iterator I, SILLocation Loc,
       B.emitCopyValueOperation(Loc, CaptureArg);
 }
 
+static SILValue cleanupLoadedCalleeValue(SILValue CalleeValue, LoadInst *LI) {
+  auto *PBI = cast<ProjectBoxInst>(LI->getOperand());
+  auto *ABI = cast<AllocBoxInst>(PBI->getOperand());
+
+  // The load instruction must have no more uses left to erase it.
+  if (!LI->use_empty())
+    return SILValue();
+  LI->eraseFromParent();
+
+  // Look through uses of the alloc box the load is loading from to find up to
+  // one store and up to one strong release.
+  StrongReleaseInst *SRI = nullptr;
+  for (Operand *ABIUse : ABI->getUses()) {
+    if (SRI == nullptr && isa<StrongReleaseInst>(ABIUse->getUser())) {
+      SRI = cast<StrongReleaseInst>(ABIUse->getUser());
+      continue;
+    }
+
+    if (ABIUse->getUser() == PBI)
+      continue;
+
+    return SILValue();
+  }
+
+  StoreInst *SI = nullptr;
+  for (Operand *PBIUse : PBI->getUses()) {
+    if (SI == nullptr && isa<StoreInst>(PBIUse->getUser())) {
+      SI = cast<StoreInst>(PBIUse->getUser());
+      continue;
+    }
+
+    return SILValue();
+  }
+
+  // If we found a store, record its source and erase it.
+  if (SI) {
+    CalleeValue = SI->getSrc();
+    SI->eraseFromParent();
+  } else {
+    CalleeValue = SILValue();
+  }
+
+  // If we found a strong release, replace it with a strong release of the
+  // source of the store and erase it.
+  if (SRI) {
+    if (CalleeValue)
+      SILBuilderWithScope(SRI).emitStrongReleaseAndFold(SRI->getLoc(),
+                                                        CalleeValue);
+    SRI->eraseFromParent();
+  }
+
+  assert(PBI->use_empty());
+  PBI->eraseFromParent();
+  assert(ABI->use_empty());
+  ABI->eraseFromParent();
+
+  return CalleeValue;
+}
+
 /// \brief Removes instructions that create the callee value if they are no
 /// longer necessary after inlining.
 static void
@@ -110,63 +170,21 @@ cleanupCalleeValue(SILValue CalleeValue, ArrayRef<SILValue> CaptureArgs,
                    ArrayRef<SILValue> FullArgs) {
   SmallVector<SILInstruction*, 16> InstsToDelete;
   for (SILValue V : FullArgs) {
-    if (SILInstruction *I = dyn_cast<SILInstruction>(V))
+    if (auto *I = dyn_cast<SILInstruction>(V))
       if (I != CalleeValue &&
           isInstructionTriviallyDead(I))
         InstsToDelete.push_back(I);
   }
   recursivelyDeleteTriviallyDeadInstructions(InstsToDelete, true);
 
-  // Handle the case where the callee of the apply is a load instruction.
-  if (LoadInst *LI = dyn_cast<LoadInst>(CalleeValue)) {
-    auto *PBI = cast<ProjectBoxInst>(LI->getOperand());
-    auto *ABI = cast<AllocBoxInst>(PBI->getOperand());
-
-    // The load instruction must have no more uses left to erase it.
-    if (!LI->use_empty())
+  // Handle the case where the callee of the apply is a load instruction. If we
+  // fail to optimize, return. Otherwise, see if we can look through other
+  // abstractions on our callee.
+  if (auto *LI = dyn_cast<LoadInst>(CalleeValue)) {
+    CalleeValue = cleanupLoadedCalleeValue(CalleeValue, LI);
+    if (!CalleeValue) {
       return;
-    LI->eraseFromParent();
-
-    // Look through uses of the alloc box the load is loading from to find up to
-    // one store and up to one strong release.
-    StrongReleaseInst *SRI = nullptr;
-    for (Operand *ABIUse : ABI->getUses()) {
-      if (SRI == nullptr && isa<StrongReleaseInst>(ABIUse->getUser())) {
-        SRI = cast<StrongReleaseInst>(ABIUse->getUser());
-      } else if (ABIUse->getUser() != PBI)
-        return;
     }
-    StoreInst *SI = nullptr;
-    for (Operand *PBIUse : PBI->getUses()) {
-      if (SI == nullptr && isa<StoreInst>(PBIUse->getUser())) {
-        SI = cast<StoreInst>(PBIUse->getUser());
-      } else
-        return;
-    }
-
-    // If we found a store, record its source and erase it.
-    if (SI) {
-      CalleeValue = SI->getSrc();
-      SI->eraseFromParent();
-    } else {
-      CalleeValue = SILValue();
-    }
-
-    // If we found a strong release, replace it with a strong release of the
-    // source of the store and erase it.
-    if (SRI) {
-      if (CalleeValue)
-        SILBuilderWithScope(SRI)
-            .emitStrongReleaseAndFold(SRI->getLoc(), CalleeValue);
-      SRI->eraseFromParent();
-    }
-
-    assert(PBI->use_empty());
-    PBI->eraseFromParent();
-    assert(ABI->use_empty());
-    ABI->eraseFromParent();
-    if (!CalleeValue)
-      return;
   }
 
   if (auto *PAI = dyn_cast<PartialApplyInst>(CalleeValue)) {
@@ -183,7 +201,7 @@ cleanupCalleeValue(SILValue CalleeValue, ArrayRef<SILValue> CaptureArgs,
     CalleeValue = Callee;
   }
 
-  if (FunctionRefInst *FRI = dyn_cast<FunctionRefInst>(CalleeValue)) {
+  if (auto *FRI = dyn_cast<FunctionRefInst>(CalleeValue)) {
     if (!FRI->use_empty())
       return;
     FRI->eraseFromParent();
@@ -198,12 +216,12 @@ cleanupCalleeValue(SILValue CalleeValue, ArrayRef<SILValue> CaptureArgs,
 ///
 /// In the case that a non-null value is returned, FullArgs contains effective
 /// argument operands for the callee function.
-static SILFunction *
-getCalleeFunction(FullApplySite AI, bool &IsThick,
-                  SmallVectorImpl<SILValue>& CaptureArgs,
-                  SmallVectorImpl<SILValue>& FullArgs,
-                  PartialApplyInst *&PartialApply,
-                  SILModule::LinkingMode Mode) {
+static SILFunction *getCalleeFunction(SILFunction *F, FullApplySite AI,
+                                      bool &IsThick,
+                                      SmallVectorImpl<SILValue> &CaptureArgs,
+                                      SmallVectorImpl<SILValue> &FullArgs,
+                                      PartialApplyInst *&PartialApply,
+                                      SILModule::LinkingMode Mode) {
   IsThick = false;
   PartialApply = nullptr;
   CaptureArgs.clear();
@@ -213,7 +231,7 @@ getCalleeFunction(FullApplySite AI, bool &IsThick,
     FullArgs.push_back(Arg);
   SILValue CalleeValue = AI.getCallee();
 
-  if (LoadInst *LI = dyn_cast<LoadInst>(CalleeValue)) {
+  if (auto *LI = dyn_cast<LoadInst>(CalleeValue)) {
     // Conservatively only see through alloc_box; we assume this pass is run
     // immediately after SILGen
     auto *PBI = dyn_cast<ProjectBoxInst>(LI->getOperand());
@@ -258,8 +276,7 @@ getCalleeFunction(FullApplySite AI, bool &IsThick,
   // We are allowed to see through exactly one "partial apply" instruction or
   // one "thin to thick function" instructions, since those are the patterns
   // generated when using auto closures.
-  if (PartialApplyInst *PAI =
-        dyn_cast<PartialApplyInst>(CalleeValue)) {
+  if (auto *PAI = dyn_cast<PartialApplyInst>(CalleeValue)) {
     for (const auto &Arg : PAI->getArguments()) {
       CaptureArgs.push_back(Arg);
       FullArgs.push_back(Arg);
@@ -268,14 +285,12 @@ getCalleeFunction(FullApplySite AI, bool &IsThick,
     CalleeValue = PAI->getCallee();
     IsThick = true;
     PartialApply = PAI;
-  } else if (ThinToThickFunctionInst *TTTFI =
-               dyn_cast<ThinToThickFunctionInst>(CalleeValue)) {
+  } else if (auto *TTTFI = dyn_cast<ThinToThickFunctionInst>(CalleeValue)) {
     CalleeValue = TTTFI->getOperand();
     IsThick = true;
   }
 
-  FunctionRefInst *FRI = dyn_cast<FunctionRefInst>(CalleeValue);
-
+  auto *FRI = dyn_cast<FunctionRefInst>(CalleeValue);
   if (!FRI)
     return nullptr;
 
@@ -300,7 +315,45 @@ getCalleeFunction(FullApplySite AI, bool &IsThick,
   if (CalleeFunction->empty()
       && !AI.getModule().linkFunction(CalleeFunction, Mode))
     return nullptr;
+
+  // If the CalleeFunction is a not-transparent definition, we can not process
+  // it.
+  if (CalleeFunction->isTransparent() == IsNotTransparent)
+    return nullptr;
+
+  if (F->isSerialized() && !CalleeFunction->hasValidLinkageForFragileRef()) {
+    if (!CalleeFunction->hasValidLinkageForFragileInline()) {
+      llvm::errs() << "caller: " << F->getName() << "\n";
+      llvm::errs() << "callee: " << CalleeFunction->getName() << "\n";
+      llvm_unreachable("Should never be inlining a resilient function into "
+                       "a fragile function");
+    }
+    return nullptr;
+  }
+
   return CalleeFunction;
+}
+
+static std::tuple<FullApplySite, SILBasicBlock::iterator>
+tryDevirtualizeApplyHelper(FullApplySite InnerAI, SILBasicBlock::iterator I,
+                           ClassHierarchyAnalysis *CHA) {
+  auto NewInstPair = tryDevirtualizeApply(InnerAI, CHA);
+  auto *NewInst = NewInstPair.first;
+  if (!NewInst)
+    return std::make_tuple(InnerAI, I);
+
+  replaceDeadApply(InnerAI, NewInst);
+  if (auto *II = dyn_cast<SILInstruction>(NewInst))
+    I = II->getIterator();
+  else
+    I = NewInst->getParentBlock()->begin();
+  auto NewAI = FullApplySite::isa(NewInstPair.second.getInstruction());
+  // *NOTE*, it is important that we return I here since we may have
+  // devirtualized but not have a full apply site anymore.
+  if (!NewAI)
+    return std::make_tuple(FullApplySite(), I);
+
+  return std::make_tuple(NewAI, I);
 }
 
 /// \brief Inlines all mandatory inlined functions into the body of a function,
@@ -346,51 +399,31 @@ runOnFunctionRecursively(SILFunction *F, FullApplySite AI,
   SmallVector<SILValue, 16> CaptureArgs;
   SmallVector<SILValue, 32> FullArgs;
 
-  for (auto FI = F->begin(), FE = F->end(); FI != FE; ++FI) {
-    for (auto I = FI->begin(), E = FI->end(); I != E; ++I) {
-      FullApplySite InnerAI = FullApplySite::isa(&*I);
+  for (auto BI = F->begin(), BE = F->end(); BI != BE; ++BI) {
+    for (auto II = BI->begin(), IE = BI->end(); II != IE; ++II) {
+      FullApplySite InnerAI = FullApplySite::isa(&*II);
 
       if (!InnerAI)
         continue;
 
       auto *ApplyBlock = InnerAI.getParent();
 
-      auto NewInstPair = tryDevirtualizeApply(InnerAI, CHA);
-      if (auto *NewInst = NewInstPair.first) {
-        replaceDeadApply(InnerAI, NewInst);
-        if (auto *II = dyn_cast<SILInstruction>(NewInst))
-          I = II->getIterator();
-        else
-          I = NewInst->getParentBlock()->begin();
-        auto NewAI = FullApplySite::isa(NewInstPair.second.getInstruction());
-        if (!NewAI)
-          continue;
-
-        InnerAI = NewAI;
-      }
+      // *NOTE* If devirtualization succeeds, sometimes II will not be InnerAI,
+      // but a casted result of InnerAI or even a block argument due to
+      // abstraction changes when calling the witness or class method. We still
+      // know that InnerAI dominates II though.
+      std::tie(InnerAI, II) = tryDevirtualizeApplyHelper(InnerAI, II, CHA);
+      if (!InnerAI)
+        continue;
 
       SILLocation Loc = InnerAI.getLoc();
       SILValue CalleeValue = InnerAI.getCallee();
       bool IsThick;
       PartialApplyInst *PAI;
-      SILFunction *CalleeFunction = getCalleeFunction(InnerAI, IsThick,
-                                                      CaptureArgs, FullArgs,
-                                                      PAI,
-                                                      Mode);
-      if (!CalleeFunction ||
-          CalleeFunction->isTransparent() == IsNotTransparent)
+      SILFunction *CalleeFunction = getCalleeFunction(
+          F, InnerAI, IsThick, CaptureArgs, FullArgs, PAI, Mode);
+      if (!CalleeFunction)
         continue;
-
-      if (F->isSerialized() &&
-          !CalleeFunction->hasValidLinkageForFragileRef()) {
-        if (!CalleeFunction->hasValidLinkageForFragileInline()) {
-          llvm::errs() << "caller: " << F->getName() << "\n";
-          llvm::errs() << "callee: " << CalleeFunction->getName() << "\n";
-          llvm_unreachable("Should never be inlining a resilient function into "
-                           "a fragile function");
-        }
-        continue;
-      }
 
       // Then recursively process it first before trying to inline it.
       if (!runOnFunctionRecursively(CalleeFunction, InnerAI, Mode,
@@ -410,6 +443,38 @@ runOnFunctionRecursively(SILFunction *F, FullApplySite AI,
         return false;
       }
 
+      // Create our initial list of substitutions.
+      llvm::SmallVector<Substitution, 16> ApplySubs(InnerAI.subs_begin(),
+                                                    InnerAI.subs_end());
+
+      // Then if we have a partial_apply, add any additional subsitutions that
+      // we may require to the end of the list.
+      if (PAI) {
+        copy(PAI->getSubstitutions(), std::back_inserter(ApplySubs));
+      }
+
+      SILOpenedArchetypesTracker OpenedArchetypesTracker(F);
+      F->getModule().registerDeleteNotificationHandler(
+          &OpenedArchetypesTracker);
+      // The callee only needs to know about opened archetypes used in
+      // the substitution list.
+      OpenedArchetypesTracker.registerUsedOpenedArchetypes(
+          InnerAI.getInstruction());
+      if (PAI) {
+        OpenedArchetypesTracker.registerUsedOpenedArchetypes(PAI);
+      }
+
+      SILInliner Inliner(*F, *CalleeFunction,
+                         SILInliner::InlineKind::MandatoryInline, ApplySubs,
+                         OpenedArchetypesTracker);
+      if (!Inliner.canInlineFunction(InnerAI)) {
+        // See comment above about casting when devirtualizing and how this
+        // sometimes causes II and InnerAI to be different and even in different
+        // blocks.
+        II = InnerAI.getInstruction()->getIterator();
+        continue;
+      }
+
       // Inline function at I, which also changes I to refer to the first
       // instruction inlined in the case that it succeeds. We purposely
       // process the inlined body after inlining, because the inlining may
@@ -421,7 +486,7 @@ runOnFunctionRecursively(SILFunction *F, FullApplySite AI,
 
       // If we intend to inline a thick function, then we need to balance the
       // reference counts for correctness.
-      if (IsThick && I != ApplyBlock->begin()) {
+      if (IsThick && II != ApplyBlock->begin()) {
         // We need to find an appropriate location for our fix up code
         // We used to do this after inlining Without any modifications
         // This caused us to add a release in a wrong place:
@@ -435,67 +500,44 @@ runOnFunctionRecursively(SILFunction *F, FullApplySite AI,
         // If that occurred we'd need to undo our fix up code.
         // Instead, we split the current basic block -
         // Making sure we have a basic block that starts with our apply.
-        SILBuilderWithScope B(I);
-        ApplyBlock = splitBasicBlockAndBranch(B, &*I, nullptr, nullptr);
-        I = ApplyBlock->begin();
+        SILBuilderWithScope B(II);
+        ApplyBlock = splitBasicBlockAndBranch(B, &*II, nullptr, nullptr);
+        II = ApplyBlock->begin();
       }
 
       // Decrement our iterator (carefully, to avoid going off the front) so it
       // is valid after inlining is done.  Inlining deletes the apply, and can
       // introduce multiple new basic blocks.
-      if (I != ApplyBlock->begin())
-        --I;
+      if (II != ApplyBlock->begin())
+        --II;
       else
-        I = ApplyBlock->end();
+        II = ApplyBlock->end();
 
-      std::vector<Substitution> ApplySubs(InnerAI.getSubstitutions());
+      Inliner.inlineFunction(InnerAI, FullArgs);
 
-      if (PAI) {
-        auto PAISubs = PAI->getSubstitutions();
-        ApplySubs.insert(ApplySubs.end(), PAISubs.begin(), PAISubs.end());
-      }
-
-      SILOpenedArchetypesTracker OpenedArchetypesTracker(*F);
-      F->getModule().registerDeleteNotificationHandler(
-          &OpenedArchetypesTracker);
-      // The callee only needs to know about opened archetypes used in
-      // the substitution list.
-      OpenedArchetypesTracker.registerUsedOpenedArchetypes(InnerAI.getInstruction());
-      if (PAI) {
-        OpenedArchetypesTracker.registerUsedOpenedArchetypes(PAI);
-      }
-
-      SILInliner Inliner(*F, *CalleeFunction,
-                         SILInliner::InlineKind::MandatoryInline,
-                         ApplySubs, OpenedArchetypesTracker);
-      if (!Inliner.inlineFunction(InnerAI, FullArgs)) {
-        I = InnerAI.getInstruction()->getIterator();
-        continue;
-      }
-
-      // Inlining was successful. Remove the apply.
+      // We were able to inline successfully. Remove the apply.
       InnerAI.getInstruction()->eraseFromParent();
 
       // Reestablish our iterator if it wrapped.
-      if (I == ApplyBlock->end())
-        I = ApplyBlock->begin();
+      if (II == ApplyBlock->end())
+        II = ApplyBlock->begin();
 
       // Update the iterator when instructions are removed.
-      DeleteInstructionsHandler DeletionHandler(I);
+      DeleteInstructionsHandler DeletionHandler(II);
 
       // If the inlined apply was a thick function, then we need to balance the
       // reference counts for correctness.
       if (IsThick)
-        fixupReferenceCounts(I, Loc, CalleeValue, CaptureArgs);
+        fixupReferenceCounts(II, Loc, CalleeValue, CaptureArgs);
 
       // Now that the IR is correct, see if we can remove dead callee
       // computations (e.g. dead partial_apply closures).
       cleanupCalleeValue(CalleeValue, CaptureArgs, FullArgs);
 
       // Reposition iterators possibly invalidated by mutation.
-      FI = SILFunction::iterator(ApplyBlock);
-      E = ApplyBlock->end();
-      assert(FI == SILFunction::iterator(I->getParent()) &&
+      BI = SILFunction::iterator(ApplyBlock);
+      IE = ApplyBlock->end();
+      assert(BI == SILFunction::iterator(II->getParent()) &&
              "Mismatch between the instruction and basic block");
       ++NumMandatoryInlines;
     }
@@ -582,7 +624,6 @@ class MandatoryInlining : public SILModuleTransform {
     }
   }
 
-  StringRef getName() override { return "Mandatory Inlining"; }
 };
 } // end anonymous namespace
 

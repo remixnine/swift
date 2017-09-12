@@ -47,6 +47,13 @@ enum SILLinkageEncoding : uint8_t {
 };
 using SILLinkageField = BCFixed<3>;
 
+enum SILVTableEntryKindEncoding : uint8_t {
+  SIL_VTABLE_ENTRY_NORMAL,
+  SIL_VTABLE_ENTRY_INHERITED,
+  SIL_VTABLE_ENTRY_OVERRIDE,
+};
+using SILVTableEntryKindField = BCFixed<2>;
+
 enum CheckedCastKindEncoding : uint8_t {
   SIL_CHECKED_CAST_ARCHETYPE_TO_ARCHETYPE,
   SIL_CHECKED_CAST_ARCHETYPE_TO_CONCRETE,
@@ -67,6 +74,20 @@ enum CastConsumptionKindEncoding : uint8_t {
   SIL_CAST_CONSUMPTION_TAKE_ALWAYS,
   SIL_CAST_CONSUMPTION_TAKE_ON_SUCCESS,
   SIL_CAST_CONSUMPTION_COPY_ON_SUCCESS,
+};
+
+enum class KeyPathComponentKindEncoding : uint8_t {
+  StoredProperty,
+  GettableProperty,
+  SettableProperty,
+  OptionalChain,
+  OptionalForce,
+  OptionalWrap,
+};
+enum class KeyPathComputedComponentIdKindEncoding : uint8_t {
+  Property,
+  Function,
+  DeclRef,
 };
 
 // Constants for packing an encoded CheckedCastKind and
@@ -171,6 +192,7 @@ namespace sil_block {
   using VTableEntryLayout = BCRecordLayout<
     SIL_VTABLE_ENTRY,
     DeclIDField,  // SILFunction name
+    SILVTableEntryKindField,  // Kind
     SILLinkageField,      // Linkage
     BCArray<ValueIDField> // SILDeclRef
   >;
@@ -246,7 +268,7 @@ namespace sil_block {
                      BCFixed<1>,  // global_init
                      BCFixed<2>,  // inlineStrategy
                      BCFixed<2>,  // side effect info.
-                     BCFixed<2>,  // number of specialize attributes
+                     BCVBR<8>,    // number of specialize attributes
                      BCFixed<1>,  // has qualified ownership
                      TypeIDField, // SILFunctionType
                      GenericEnvironmentIDField,
@@ -357,7 +379,7 @@ namespace sil_block {
   using SILOneOperandLayout = BCRecordLayout<
     SIL_ONE_OPERAND,
     SILInstOpCodeField,
-    BCFixed<3>,          // Optional attributes
+    BCFixed<4>,          // Optional attributes
     TypeIDField,
     SILTypeCategoryField,
     ValueIDField
@@ -367,7 +389,7 @@ namespace sil_block {
   using SILTwoOperandsLayout = BCRecordLayout<
     SIL_TWO_OPERANDS,
     SILInstOpCodeField,
-    BCFixed<2>,          // Optional attributes
+    BCFixed<4>,          // Optional attributes
     TypeIDField,
     SILTypeCategoryField,
     ValueIDField,

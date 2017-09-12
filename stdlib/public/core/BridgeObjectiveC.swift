@@ -469,6 +469,14 @@ public struct AutoreleasingUnsafeMutablePointer<Pointee /* TODO : class */>
     guard let unwrapped = from else { return nil }
     self.init(unwrapped)
   }
+
+  @_transparent
+  public static func == (
+    lhs: AutoreleasingUnsafeMutablePointer,
+    rhs: AutoreleasingUnsafeMutablePointer
+  ) -> Bool {
+    return Bool(Builtin.cmp_eq_RawPointer(lhs._rawValue, rhs._rawValue))
+  }
 }
 
 extension UnsafeMutableRawPointer {
@@ -523,14 +531,6 @@ extension AutoreleasingUnsafeMutablePointer : CustomDebugStringConvertible {
   }
 }
 
-@_transparent
-public func == <Pointee>(
-  lhs: AutoreleasingUnsafeMutablePointer<Pointee>,
-  rhs: AutoreleasingUnsafeMutablePointer<Pointee>
-) -> Bool {
-  return Bool(Builtin.cmp_eq_RawPointer(lhs._rawValue, rhs._rawValue))
-}
-
 @_fixed_layout
 @_versioned
 internal struct _CocoaFastEnumerationStackBuf {
@@ -578,21 +578,6 @@ internal struct _CocoaFastEnumerationStackBuf {
 
     _sanityCheck(MemoryLayout.size(ofValue: self) >=
                    MemoryLayout<Optional<UnsafeRawPointer>>.size * count)
-  }
-}
-
-extension AutoreleasingUnsafeMutablePointer {
-  @available(*, unavailable, renamed: "Pointee")
-  public typealias Memory = Pointee
-
-  @available(*, unavailable, renamed: "pointee")
-  public var memory: Pointee {
-    Builtin.unreachable()
-  }
-
-  @available(*, unavailable, message: "Removed in Swift 3. Please use nil literal instead.")
-  public init() {
-    Builtin.unreachable()
   }
 }
 

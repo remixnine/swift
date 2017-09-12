@@ -34,6 +34,7 @@ class SILBasicBlock :
 public llvm::ilist_node<SILBasicBlock>, public SILAllocated<SILBasicBlock> {
   friend class SILSuccessor;
   friend class SILFunction;
+  friend class SILGlobalVariable;
 public:
   using InstListType = llvm::iplist<SILInstruction>;
 private:
@@ -94,7 +95,7 @@ public:
   void push_back(SILInstruction *I);
   void push_front(SILInstruction *I);
   void remove(SILInstruction *I);
-  void erase(SILInstruction *I);
+  iterator erase(SILInstruction *I);
 
   SILInstruction &back() { return InstList.back(); }
   const SILInstruction &back() const {
@@ -142,6 +143,9 @@ public:
   /// Assumes that the basic blocks must reside in the same function. In asserts
   /// builds, an assert verifies that this is true.
   void moveAfter(SILBasicBlock *After);
+
+  /// \brief Moves the instruction to the iterator in this basic block.
+  void moveTo(SILBasicBlock::iterator To, SILInstruction *I);
 
   //===--------------------------------------------------------------------===//
   // SILBasicBlock Argument List Inspection and Manipulation
@@ -247,6 +251,33 @@ public:
   const_succ_iterator succ_begin() const { return getSuccessors().begin(); }
   const_succ_iterator succ_end() const { return getSuccessors().end(); }
 
+  using succblock_iterator =
+      TransformIterator<SILSuccessor *,
+                        std::function<SILBasicBlock *(const SILSuccessor &)>>;
+  using const_succblock_iterator = TransformIterator<
+      const SILSuccessor *,
+      std::function<const SILBasicBlock *(const SILSuccessor &)>>;
+  succblock_iterator succblock_begin() {
+    using FuncTy = std::function<SILBasicBlock *(const SILSuccessor &)>;
+    FuncTy F(&SILSuccessor::getBB);
+    return makeTransformIterator(getSuccessors().begin(), F);
+  }
+  succblock_iterator succblock_end() {
+    using FuncTy = std::function<SILBasicBlock *(const SILSuccessor &)>;
+    FuncTy F(&SILSuccessor::getBB);
+    return makeTransformIterator(getSuccessors().end(), F);
+  }
+  const_succblock_iterator succblock_begin() const {
+    using FuncTy = std::function<const SILBasicBlock *(const SILSuccessor &)>;
+    FuncTy F(&SILSuccessor::getBB);
+    return makeTransformIterator(getSuccessors().begin(), F);
+  }
+  const_succblock_iterator succblock_end() const {
+    using FuncTy = std::function<const SILBasicBlock *(const SILSuccessor &)>;
+    FuncTy F(&SILSuccessor::getBB);
+    return makeTransformIterator(getSuccessors().end(), F);
+  }
+
   SILBasicBlock *getSingleSuccessorBlock() {
     if (succ_empty() || std::next(succ_begin()) != succ_end())
       return nullptr;
@@ -286,7 +317,7 @@ public:
     return makeTransformRange(getSuccessors(), F);
   }
 
-  using pred_iterator = SILSuccessorIterator;
+  using pred_iterator = SILSuccessor::pred_iterator;
 
   bool pred_empty() const { return PredList == nullptr; }
   pred_iterator pred_begin() const { return pred_iterator(PredList); }
@@ -326,6 +357,11 @@ public:
   /// Returns true if this instruction only contains a branch instruction.
   bool isTrampoline() const;
 
+  /// Returns true if it is legal to hoist instructions into this block.
+  ///
+  /// Used by llvm::LoopInfo.
+  bool isLegalToHoistInto() const;
+
   //===--------------------------------------------------------------------===//
   // Debugging
   //===--------------------------------------------------------------------===//
@@ -351,6 +387,14 @@ public:
     dropAllArguments();
     for (SILInstruction &I : *this)
       I.dropAllReferences();
+  }
+
+  void eraseInstructions() {
+   for (auto It = begin(); It != end();) {
+      auto *Inst = &*It++;
+      Inst->replaceAllUsesWithUndef();
+      Inst->eraseFromParent();
+    }
   }
 
 private:
@@ -398,11 +442,8 @@ private:
 public:
   static void deleteNode(SILBasicBlock *BB) { BB->~SILBasicBlock(); }
 
-  void addNodeToList(SILBasicBlock *BB) {}
-
   void transferNodesFromList(ilist_traits<SILBasicBlock> &SrcTraits,
                              block_iterator First, block_iterator Last);
-
 private:
   static void createNode(const SILBasicBlock &);
 };

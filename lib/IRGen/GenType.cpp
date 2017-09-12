@@ -183,21 +183,6 @@ static llvm::Constant *asSizeConstant(IRGenModule &IGM, Size size) {
   return llvm::ConstantInt::get(IGM.SizeTy, size.getValue());
 }
 
-/// Return the size and alignment of this type.
-std::pair<llvm::Value*,llvm::Value*>
-FixedTypeInfo::getSizeAndAlignmentMask(IRGenFunction &IGF,
-                                       SILType T) const {
-  return {FixedTypeInfo::getSize(IGF, T),
-          FixedTypeInfo::getAlignmentMask(IGF, T)};
-}
-std::tuple<llvm::Value*,llvm::Value*,llvm::Value*>
-FixedTypeInfo::getSizeAndAlignmentMaskAndStride(IRGenFunction &IGF,
-                                                SILType T) const {
-  return std::make_tuple(FixedTypeInfo::getSize(IGF, T),
-                         FixedTypeInfo::getAlignmentMask(IGF, T),
-                         FixedTypeInfo::getStride(IGF, T));
-}
-
 llvm::Value *FixedTypeInfo::getSize(IRGenFunction &IGF, SILType T) const {
   return FixedTypeInfo::getStaticSize(IGF.IGM);
 }
@@ -1372,7 +1357,7 @@ namespace {
         return false;
 
       for (auto elt : decl->getAllElements()) {
-        if (elt->getArgumentInterfaceType() &&
+        if (elt->hasAssociatedValues() &&
             !elt->isIndirect() &&
             visit(elt->getArgumentInterfaceType()->getCanonicalType()))
           return true;
@@ -1531,8 +1516,9 @@ llvm::StructType *IRGenModule::createNominalType(CanType type) {
   assert(type.getNominalOrBoundGenericNominal());
 
   // We share type infos for different instantiations of a generic type
-  // when the archetypes have the same exemplars.  Mangling the archetypes
-  // in this case can be very misleading, so we just mangle the base name.
+  // when the archetypes have the same exemplars.  We cannot mangle
+  // archetypes, and the mangling does not have to be unique, so we just
+  // mangle the unbound generic form of the type.
   if (type->hasArchetype())
     type = type.getNominalOrBoundGenericNominal()->getDeclaredType()
                                                  ->getCanonicalType();
@@ -1625,6 +1611,14 @@ bool IRGenModule::isPOD(SILType type, ResilienceExpansion expansion) {
   return getTypeInfo(type).isPOD(expansion);
 }
 
+/// Determine whether this type is known to be empty.
+bool IRGenModule::isKnownEmpty(SILType type, ResilienceExpansion expansion) {
+  if (auto tuple = type.getAs<TupleType>()) {
+    if (tuple->getNumElements() == 0)
+      return true;
+  }
+  return getTypeInfo(type).isKnownEmpty(expansion);
+}
 
 SpareBitVector IRGenModule::getSpareBitsForType(llvm::Type *scalarTy, Size size) {
   auto it = SpareBitsForTypes.find(scalarTy);
@@ -1744,6 +1738,11 @@ SILType irgen::getSingletonAggregateFieldType(IRGenModule &IGM, SILType t,
         || structDecl->hasClangNode())
       return SILType();
 
+    // A single-field struct with custom alignment has different layout from its
+    // field.
+    if (structDecl->getAttrs().hasAttribute<AlignmentAttr>())
+      return SILType();
+
     // If there's only one stored property, we have the layout of its field.
     auto allFields = structDecl->getStoredProperties();
     
@@ -1764,7 +1763,7 @@ SILType irgen::getSingletonAggregateFieldType(IRGenModule &IGM, SILType t,
     
     auto theCase = allCases.begin();
     if (!allCases.empty() && std::next(theCase) == allCases.end()
-        && (*theCase)->getArgumentInterfaceType())
+        && (*theCase)->hasAssociatedValues())
       return t.getEnumElementType(*theCase, IGM.getSILModule());
 
     return SILType();

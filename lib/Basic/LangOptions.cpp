@@ -36,6 +36,7 @@ static const StringRef SupportedConditionalCompilationOSs[] = {
   "Windows",
   "Android",
   "PS4",
+  "Cygwin",
 };
 
 static const StringRef SupportedConditionalCompilationArches[] = {
@@ -97,6 +98,10 @@ checkPlatformConditionSupported(PlatformConditionKind Kind, StringRef Value,
   case PlatformConditionKind::Runtime:
     return contains(SupportedConditionalCompilationRuntimes, Value,
                     suggestions);
+  case PlatformConditionKind::CanImport:
+    // All importable names are valid.
+    // FIXME: Perform some kind of validation of the string?
+    return true;
   }
   llvm_unreachable("Unhandled enum value");
 }
@@ -157,6 +162,8 @@ std::pair<bool, bool> LangOptions::setTarget(llvm::Triple triple) {
     addPlatformConditionValue(PlatformConditionKind::OS, "FreeBSD");
   else if (triple.isOSWindows())
     addPlatformConditionValue(PlatformConditionKind::OS, "Windows");
+  else if (triple.isWindowsCygwinEnvironment())
+    addPlatformConditionValue(PlatformConditionKind::OS, "Cygwin");
   else if (triple.isPS4())
     addPlatformConditionValue(PlatformConditionKind::OS, "PS4");
   else

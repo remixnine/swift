@@ -29,6 +29,26 @@
 using namespace swift;
 
 namespace {
+  /// This emits a diagnostic with a fixit to remove the attribute.
+  template<typename ...ArgTypes>
+  void diagnoseAndRemoveAttr(TypeChecker &TC, Decl *D, DeclAttribute *attr,
+                             ArgTypes &&...Args) {
+    assert(!D->hasClangNode() && "Clang imported propagated a bogus attribute");
+    if (!D->hasClangNode()) {
+      SourceLoc loc = attr->getLocation();
+      assert(loc.isValid() && "Diagnosing attribute with invalid location");
+      if (loc.isInvalid()) {
+        loc = D->getLoc();
+      }
+      if (loc.isValid()) {
+        TC.diagnose(loc, std::forward<ArgTypes>(Args)...)
+          .fixItRemove(attr->getRangeWithAt());
+      }
+    }
+
+    attr->setInvalid();
+  }
+
 /// This visits each attribute on a decl early, before the majority of type
 /// checking has been performed for the decl.  The visitor should return true if
 /// the attribute is invalid and should be marked as such.
@@ -42,9 +62,7 @@ public:
   /// This emits a diagnostic with a fixit to remove the attribute.
   template<typename ...ArgTypes>
   void diagnoseAndRemoveAttr(DeclAttribute *attr, ArgTypes &&...Args) {
-    TC.diagnose(attr->getLocation(), std::forward<ArgTypes>(Args)...)
-      .fixItRemove(attr->getRangeWithAt());
-    attr->setInvalid();
+    ::diagnoseAndRemoveAttr(TC, D, attr, std::forward<ArgTypes>(Args)...);
   }
 
   /// Deleting this ensures that all attributes are covered by the visitor
@@ -68,6 +86,8 @@ public:
   IGNORED_ATTR(ObjC)
   IGNORED_ATTR(ObjCBridged)
   IGNORED_ATTR(ObjCNonLazyRealization)
+  IGNORED_ATTR(ObjCRuntimeName)
+  IGNORED_ATTR(RestatedObjCConformance)
   IGNORED_ATTR(Optional)
   IGNORED_ATTR(Postfix)
   IGNORED_ATTR(Prefix)
@@ -85,6 +105,9 @@ public:
   IGNORED_ATTR(Versioned)
   IGNORED_ATTR(ShowInInterface)
   IGNORED_ATTR(DiscardableResult)
+  IGNORED_ATTR(Implements)
+  IGNORED_ATTR(StaticInitializeObjCMetadata)
+  IGNORED_ATTR(DowngradeExhaustivityCheck)
 #undef IGNORED_ATTR
 
   // @noreturn has been replaced with a 'Never' return type.
@@ -141,8 +164,9 @@ public:
         diag.fixItInsert(resultLoc, fix);
       }
 
-      FD->getBodyResultTypeLoc() = TypeLoc::withoutLoc(
-          TC.Context.getNeverType());
+      auto neverType = TC.Context.getNeverType();
+      if (neverType)
+        FD->getBodyResultTypeLoc() = TypeLoc::withoutLoc(neverType);
     }
   }
 
@@ -153,17 +177,11 @@ public:
       TC.diagnose(attr->getLocation(), diag::alignment_not_power_of_two);
   }
 
-  void visitAutoClosureAttr(AutoClosureAttr *attr) {
-    TC.checkAutoClosureAttr(cast<ParamDecl>(D), attr);
-  }
-  void visitNoEscapeAttr(NoEscapeAttr *attr) {
-    TC.checkNoEscapeAttr(cast<ParamDecl>(D), attr);
-  }
-
   void visitTransparentAttr(TransparentAttr *attr);
   void visitMutationAttr(DeclAttribute *attr);
   void visitMutatingAttr(MutatingAttr *attr) { visitMutationAttr(attr); }
   void visitNonMutatingAttr(NonMutatingAttr *attr) { visitMutationAttr(attr); }
+  void visitConsumingAttr(ConsumingAttr *attr) { visitMutationAttr(attr); }
   void visitDynamicAttr(DynamicAttr *attr);
 
   void visitOwnershipAttr(OwnershipAttr *attr) {
@@ -172,8 +190,8 @@ public:
 
   void visitFinalAttr(FinalAttr *attr) {
     // Reject combining 'final' with 'open'.
-    if (auto accessibility = D->getAttrs().getAttribute<AccessibilityAttr>()) {
-      if (accessibility->getAccess() == Accessibility::Open) {
+    if (auto accessAttr = D->getAttrs().getAttribute<AccessControlAttr>()) {
+      if (accessAttr->getAccess() == AccessLevel::Open) {
         TC.diagnose(attr->getLocation(), diag::open_decl_cannot_be_final,
                     D->getDescriptiveKind());
         return;
@@ -186,7 +204,8 @@ public:
     // 'final' only makes sense in the context of a class declaration.
     // Reject it on global functions, protocols, structs, enums, etc.
     if (!D->getDeclContext()->getAsClassOrClassExtensionContext()) {
-      if (D->getDeclContext()->getAsProtocolExtensionContext())
+      if (TC.Context.isSwiftVersion3() && 
+          D->getDeclContext()->getAsProtocolExtensionContext())
         TC.diagnose(attr->getLocation(), 
           diag::protocol_extension_cannot_be_final)
           .fixItRemove(attr->getRange());
@@ -230,9 +249,9 @@ public:
   void visitLLDBDebuggerFunctionAttr(LLDBDebuggerFunctionAttr *attr);
   void visitNSManagedAttr(NSManagedAttr *attr);
   void visitOverrideAttr(OverrideAttr *attr);
-  void visitAccessibilityAttr(AccessibilityAttr *attr);
-  void visitSetterAccessibilityAttr(SetterAccessibilityAttr *attr);
-  bool visitAbstractAccessibilityAttr(AbstractAccessibilityAttr *attr);
+  void visitAccessControlAttr(AccessControlAttr *attr);
+  void visitSetterAccessAttr(SetterAccessAttr *attr);
+  bool visitAbstractAccessControlAttr(AbstractAccessControlAttr *attr);
   void visitSILStoredAttr(SILStoredAttr *attr);
   void visitObjCMembersAttr(ObjCMembersAttr *attr);
 };
@@ -266,19 +285,64 @@ void AttributeEarlyChecker::visitTransparentAttr(TransparentAttr *attr) {
 void AttributeEarlyChecker::visitMutationAttr(DeclAttribute *attr) {
   FuncDecl *FD = cast<FuncDecl>(D);
 
+  SelfAccessKind attrModifier;
+  switch (attr->getKind()) {
+  case DeclAttrKind::DAK_Consuming:
+    attrModifier = SelfAccessKind::__Consuming;
+    break;
+  case DeclAttrKind::DAK_Mutating:
+    attrModifier = SelfAccessKind::Mutating;
+    break;
+  case DeclAttrKind::DAK_NonMutating:
+    attrModifier = SelfAccessKind::NonMutating;
+    break;
+  default:
+    llvm_unreachable("unhandled attribute kind");
+  }
+
+  // mutation attributes may only appear in type context.
   auto contextTy = FD->getDeclContext()->getDeclaredInterfaceType();
   if (!contextTy)
-    return diagnoseAndRemoveAttr(attr, diag::mutating_invalid_global_scope);
+    return diagnoseAndRemoveAttr(attr, diag::mutating_invalid_global_scope,
+                                 unsigned(attrModifier));
 
-  if (contextTy->hasReferenceSemantics())
-    return diagnoseAndRemoveAttr(attr, diag::mutating_invalid_classes);
+  // 'mutating' and 'nonmutating' are not valid on types
+  // with reference semantics.
+  if (contextTy->hasReferenceSemantics()) {
+    if (attrModifier != SelfAccessKind::__Consuming)
+      return diagnoseAndRemoveAttr(attr, diag::mutating_invalid_classes,
+                                   unsigned(attrModifier));
+  }
   
-  // Verify we don't have both mutating and nonmutating.
-  if (FD->getAttrs().hasAttribute<MutatingAttr>())
+  // Verify we don't have more than one of mutating, nonmutating,
+  // and __consuming.
+  if ((FD->getAttrs().hasAttribute<MutatingAttr>() +
+          FD->getAttrs().hasAttribute<NonMutatingAttr>() +
+          FD->getAttrs().hasAttribute<ConsumingAttr>()) > 1) {
     if (auto *NMA = FD->getAttrs().getAttribute<NonMutatingAttr>()) {
-      diagnoseAndRemoveAttr(NMA, diag::functions_mutating_and_not);
-      if (NMA == attr) return;
+      if (attrModifier != SelfAccessKind::NonMutating) {
+        diagnoseAndRemoveAttr(NMA, diag::functions_mutating_and_not,
+                              unsigned(SelfAccessKind::NonMutating),
+                              unsigned(attrModifier));
+      }
     }
+
+    if (auto *MUA = FD->getAttrs().getAttribute<MutatingAttr>()) {
+      if (attrModifier != SelfAccessKind::Mutating) {
+        diagnoseAndRemoveAttr(MUA, diag::functions_mutating_and_not,
+                                unsigned(SelfAccessKind::Mutating),
+                                unsigned(attrModifier));
+      }
+    }
+
+    if (auto *CSA = FD->getAttrs().getAttribute<ConsumingAttr>()) {
+      if (attrModifier != SelfAccessKind::__Consuming) {
+        diagnoseAndRemoveAttr(CSA, diag::functions_mutating_and_not,
+                              unsigned(SelfAccessKind::__Consuming),
+                              unsigned(attrModifier));
+      }
+    }
+  }
   
   // Verify that we don't have a static function.
   if (FD->isStatic())
@@ -304,10 +368,8 @@ void AttributeEarlyChecker::visitDynamicAttr(DynamicAttr *attr) {
 void AttributeEarlyChecker::visitIBActionAttr(IBActionAttr *attr) {
   // Only instance methods returning () can be IBActions.
   const FuncDecl *FD = cast<FuncDecl>(D);
-  if (!FD->getDeclContext()->getAsClassOrClassExtensionContext() ||
-      FD->isStatic() || FD->isAccessor())
+  if (!FD->isPotentialIBActionTarget())
     return diagnoseAndRemoveAttr(attr, diag::invalid_ibaction_decl);
-
 }
 
 void AttributeEarlyChecker::visitIBDesignableAttr(IBDesignableAttr *attr) {
@@ -568,9 +630,9 @@ void AttributeEarlyChecker::visitLazyAttr(LazyAttr *attr) {
   }
 }
 
-bool AttributeEarlyChecker::visitAbstractAccessibilityAttr(
-    AbstractAccessibilityAttr *attr) {
-  // Accessibility attr may only be used on value decls and extensions.
+bool AttributeEarlyChecker::visitAbstractAccessControlAttr(
+    AbstractAccessControlAttr *attr) {
+  // Access control attr may only be used on value decls and extensions.
   if (!isa<ValueDecl>(D) && !isa<ExtensionDecl>(D)) {
     diagnoseAndRemoveAttr(attr, diag::invalid_decl_modifier, attr);
     return true;
@@ -599,18 +661,18 @@ bool AttributeEarlyChecker::visitAbstractAccessibilityAttr(
   return false;
 }
 
-void AttributeEarlyChecker::visitAccessibilityAttr(AccessibilityAttr *attr) {
-  visitAbstractAccessibilityAttr(attr);
+void AttributeEarlyChecker::visitAccessControlAttr(AccessControlAttr *attr) {
+  visitAbstractAccessControlAttr(attr);
 }
 
-void AttributeEarlyChecker::visitSetterAccessibilityAttr(
-    SetterAccessibilityAttr *attr) {
+void AttributeEarlyChecker::visitSetterAccessAttr(
+    SetterAccessAttr *attr) {
   auto storage = dyn_cast<AbstractStorageDecl>(D);
   if (!storage)
     return diagnoseAndRemoveAttr(attr, diag::access_control_setter,
                                  attr->getAccess());
 
-  if (visitAbstractAccessibilityAttr(attr))
+  if (visitAbstractAccessControlAttr(attr))
     return;
 
   if (!storage->isSettable(storage->getDeclContext())) {
@@ -708,6 +770,12 @@ class AttributeChecker : public AttributeVisitor<AttributeChecker> {
   TypeChecker &TC;
   Decl *D;
 
+  /// This emits a diagnostic with a fixit to remove the attribute.
+  template<typename ...ArgTypes>
+  void diagnoseAndRemoveAttr(DeclAttribute *attr, ArgTypes &&...Args) {
+    ::diagnoseAndRemoveAttr(TC, D, attr, std::forward<ArgTypes>(Args)...);
+  }
+
 public:
   AttributeChecker(TypeChecker &TC, Decl *D) : TC(TC), D(D) {}
 
@@ -718,8 +786,8 @@ public:
 #define IGNORED_ATTR(CLASS)                                              \
     void visit##CLASS##Attr(CLASS##Attr *) {}
 
-    IGNORED_ATTR(AutoClosure)
     IGNORED_ATTR(Alignment)
+    IGNORED_ATTR(Consuming)
     IGNORED_ATTR(Convenience)
     IGNORED_ATTR(Dynamic)
     IGNORED_ATTR(Effects)
@@ -733,7 +801,6 @@ public:
     IGNORED_ATTR(Lazy)      // checked early.
     IGNORED_ATTR(LLDBDebuggerFunction)
     IGNORED_ATTR(Mutating)
-    IGNORED_ATTR(NoEscape)
     IGNORED_ATTR(NonMutating)
     IGNORED_ATTR(NonObjC)
     IGNORED_ATTR(NoReturn)
@@ -741,6 +808,8 @@ public:
     IGNORED_ATTR(ObjC)
     IGNORED_ATTR(ObjCBridged)
     IGNORED_ATTR(ObjCNonLazyRealization)
+    IGNORED_ATTR(ObjCRuntimeName)
+    IGNORED_ATTR(RestatedObjCConformance)
     IGNORED_ATTR(Optional)
     IGNORED_ATTR(Ownership)
     IGNORED_ATTR(Override)
@@ -755,6 +824,8 @@ public:
     IGNORED_ATTR(WarnUnqualifiedAccess)
     IGNORED_ATTR(ShowInInterface)
     IGNORED_ATTR(ObjCMembers)
+    IGNORED_ATTR(StaticInitializeObjCMetadata)
+    IGNORED_ATTR(DowngradeExhaustivityCheck)
 #undef IGNORED_ATTR
 
   void visitAvailableAttr(AvailableAttr *attr);
@@ -767,8 +838,8 @@ public:
   void visitRequiredAttr(RequiredAttr *attr);
   void visitRethrowsAttr(RethrowsAttr *attr);
 
-  void visitAccessibilityAttr(AccessibilityAttr *attr);
-  void visitSetterAccessibilityAttr(SetterAccessibilityAttr *attr);
+  void visitAccessControlAttr(AccessControlAttr *attr);
+  void visitSetterAccessAttr(SetterAccessAttr *attr);
 
   void checkApplicationMainAttribute(DeclAttribute *attr,
                                      Identifier Id_ApplicationDelegate,
@@ -795,6 +866,7 @@ public:
   void visitInlineableAttr(InlineableAttr *attr);
   
   void visitDiscardableResultAttr(DiscardableResultAttr *attr);
+  void visitImplementsAttr(ImplementsAttr *attr);
 };
 } // end anonymous namespace
 
@@ -1182,7 +1254,8 @@ void AttributeChecker::checkApplicationMainAttribute(DeclAttribute *attr,
                                            SourceLoc(),
                                            lookupOptions);
     if (lookup.size() == 1)
-      ApplicationDelegateProto = dyn_cast<ProtocolDecl>(lookup[0]);
+      ApplicationDelegateProto = dyn_cast<ProtocolDecl>(
+        lookup[0].getValueDecl());
   }
 
   if (!ApplicationDelegateProto ||
@@ -1210,7 +1283,7 @@ void AttributeChecker::checkApplicationMainAttribute(DeclAttribute *attr,
                                          SourceLoc(), lookupOptions);
 
   for (const auto &result : lookupMain) {
-    TC.validateDecl(result.Decl);
+    TC.validateDecl(result.getValueDecl());
   }
   auto Foundation = TC.Context.getLoadedModule(C.Id_Foundation);
   if (Foundation) {
@@ -1220,7 +1293,7 @@ void AttributeChecker::checkApplicationMainAttribute(DeclAttribute *attr,
                           SourceLoc(),
                           lookupOptions);
     for (const auto &result : lookupString) {
-      TC.validateDecl(result.Decl);
+      TC.validateDecl(result.getValueDecl());
     }
   }
 }
@@ -1340,9 +1413,9 @@ void AttributeChecker::visitRethrowsAttr(RethrowsAttr *attr) {
   attr->setInvalid();
 }
 
-void AttributeChecker::visitAccessibilityAttr(AccessibilityAttr *attr) {
+void AttributeChecker::visitAccessControlAttr(AccessControlAttr *attr) {
   if (auto extension = dyn_cast<ExtensionDecl>(D)) {
-    if (attr->getAccess() == Accessibility::Open) {
+    if (attr->getAccess() == AccessLevel::Open) {
       TC.diagnose(attr->getLocation(), diag::access_control_extension_open)
         .fixItReplace(attr->getRange(), "public");
       attr->setInvalid();
@@ -1350,7 +1423,7 @@ void AttributeChecker::visitAccessibilityAttr(AccessibilityAttr *attr) {
     }
 
     Type extendedTy = extension->getExtendedType();
-    Accessibility typeAccess = extendedTy->getAnyNominal()->getFormalAccess();
+    AccessLevel typeAccess = extendedTy->getAnyNominal()->getFormalAccess();
     if (attr->getAccess() > typeAccess) {
       TC.diagnose(attr->getLocation(), diag::access_control_extension_more,
                   typeAccess,
@@ -1362,9 +1435,9 @@ void AttributeChecker::visitAccessibilityAttr(AccessibilityAttr *attr) {
     }
 
   } else if (auto extension = dyn_cast<ExtensionDecl>(D->getDeclContext())) {
-    TC.computeDefaultAccessibility(extension);
-    Accessibility maxAccess = extension->getMaxAccessibility();
-    if (std::min(attr->getAccess(), Accessibility::Public) > maxAccess) {
+    TC.computeDefaultAccessLevel(extension);
+    AccessLevel maxAccess = extension->getMaxAccessLevel();
+    if (std::min(attr->getAccess(), AccessLevel::Public) > maxAccess) {
       // FIXME: It would be nice to say what part of the requirements actually
       // end up being problematic.
       auto diag =
@@ -1373,23 +1446,23 @@ void AttributeChecker::visitAccessibilityAttr(AccessibilityAttr *attr) {
                       attr->getAccess(),
                       D->getDescriptiveKind(),
                       maxAccess);
-      swift::fixItAccessibility(diag, cast<ValueDecl>(D), maxAccess);
+      swift::fixItAccess(diag, cast<ValueDecl>(D), maxAccess);
       return;
     }
 
-    auto extAttr = extension->getAttrs().getAttribute<AccessibilityAttr>();
+    auto extAttr = extension->getAttrs().getAttribute<AccessControlAttr>();
     if (extAttr && attr->getAccess() > extAttr->getAccess()) {
       auto diag = TC.diagnose(attr->getLocation(),
                               diag::access_control_ext_member_more,
                               attr->getAccess(),
                               D->getDescriptiveKind(),
                               extAttr->getAccess());
-      swift::fixItAccessibility(diag, cast<ValueDecl>(D), extAttr->getAccess());
+      swift::fixItAccess(diag, cast<ValueDecl>(D), extAttr->getAccess());
       return;
     }
   }
 
-  if (attr->getAccess() == Accessibility::Open) {
+  if (attr->getAccess() == AccessLevel::Open) {
     if (!isa<ClassDecl>(D) && !D->isPotentiallyOverridable() &&
         !attr->isInvalid()) {
       TC.diagnose(attr->getLocation(), diag::access_control_open_bad_decl)
@@ -1400,7 +1473,7 @@ void AttributeChecker::visitAccessibilityAttr(AccessibilityAttr *attr) {
 }
 
 void
-AttributeChecker::visitSetterAccessibilityAttr(SetterAccessibilityAttr *attr) {
+AttributeChecker::visitSetterAccessAttr(SetterAccessAttr *attr) {
   auto getterAccess = cast<ValueDecl>(D)->getFormalAccess();
   if (attr->getAccess() > getterAccess) {
     // This must stay in sync with diag::access_control_setter_more.
@@ -1620,14 +1693,15 @@ void AttributeChecker::visitSpecializeAttr(SpecializeAttr *attr) {
   if (!genericSig) {
     // Only generic functions are permitted to have trailing where clauses.
     TC.diagnose(attr->getLocation(),
-                diag::specialize_attr_nongeneric_trailing_where, FD->getName())
+                diag::specialize_attr_nongeneric_trailing_where,
+                FD->getFullName())
         .highlight(trailingWhereClause->getSourceRange());
     return;
   }
 
   // Form a new generic signature based on the old one.
   GenericSignatureBuilder Builder(D->getASTContext(),
-                           LookUpConformanceInModule(DC->getParentModule()));
+                                  TypeChecker::LookUpConformance(TC, DC));
 
   // First, add the old generic signature.
   Builder.addGenericSignature(genericSig);
@@ -1786,26 +1860,23 @@ void AttributeChecker::visitSpecializeAttr(SpecializeAttr *attr) {
 
   // Add the requirements to the builder.
   for (auto &req : resolvedRequirements)
-    Builder.addRequirement(&req);
+    Builder.addRequirement(&req, DC->getParentModule());
 
   // Check the result.
-  Builder.finalize(attr->getLocation(), genericSig->getGenericParams(),
-                   /*allowConcreteGenericParams=*/true);
-}
-
-static Accessibility getAccessForDiagnostics(const ValueDecl *D) {
-  return std::min(D->getFormalAccess(),
-                  D->getEffectiveAccess());
+  (void)Builder.computeGenericSignature(attr->getLocation(),
+                                        /*allowConcreteGenericParams=*/true);
 }
 
 void AttributeChecker::visitFixedLayoutAttr(FixedLayoutAttr *attr) {
   auto *VD = cast<ValueDecl>(D);
 
-  if (VD->getEffectiveAccess() < Accessibility::Public) {
+  auto access = VD->getFormalAccess(/*useDC=*/nullptr,
+                                    /*respectVersionedAttr=*/true);
+  if (access < AccessLevel::Public) {
     TC.diagnose(attr->getLocation(),
                 diag::fixed_layout_attr_on_internal_type,
-                VD->getName(),
-                getAccessForDiagnostics(VD))
+                VD->getFullName(),
+                access)
         .fixItRemove(attr->getRangeWithAt());
     attr->setInvalid();
   }
@@ -1815,7 +1886,7 @@ void AttributeChecker::visitVersionedAttr(VersionedAttr *attr) {
   auto *VD = cast<ValueDecl>(D);
 
   // FIXME: Once protocols can contain nominal types, do we want to allow
-  // these nominal types to have accessibility (and also @_versioned)?
+  // these nominal types to have access control (and also @_versioned)?
   if (isa<ProtocolDecl>(VD->getDeclContext())) {
     TC.diagnose(attr->getLocation(),
                 diag::versioned_attr_in_protocol)
@@ -1825,10 +1896,9 @@ void AttributeChecker::visitVersionedAttr(VersionedAttr *attr) {
   }
 
   // @_versioned can only be applied to internal declarations.
-  if (VD->getFormalAccess() != Accessibility::Internal) {
-    TC.diagnose(attr->getLocation(),
-                diag::versioned_attr_with_explicit_accessibility,
-                VD->getName(),
+  if (VD->getFormalAccess() != AccessLevel::Internal) {
+    TC.diagnose(attr->getLocation(), diag::versioned_attr_with_explicit_access,
+                VD->getFullName(),
                 VD->getFormalAccess())
         .fixItRemove(attr->getRangeWithAt());
     attr->setInvalid();
@@ -1855,13 +1925,13 @@ void AttributeChecker::visitInlineableAttr(InlineableAttr *attr) {
 
   // @_inlineable can only be applied to public or @_versioned
   // declarations.
-  if (VD->getFormalAccess() < Accessibility::Internal ||
-      (!VD->getAttrs().hasAttribute<VersionedAttr>() &&
-       VD->getFormalAccess() < Accessibility::Public)) {
+  auto access = VD->getFormalAccess(/*useDC=*/nullptr,
+                                    /*respectVersionedAttr=*/true);
+  if (access < AccessLevel::Public) {
     TC.diagnose(attr->getLocation(),
                 diag::inlineable_decl_not_public,
-                VD->getName(),
-                getAccessForDiagnostics(VD))
+                VD->getBaseName(),
+                access)
         .fixItRemove(attr->getRangeWithAt());
     attr->setInvalid();
     return;
@@ -1882,6 +1952,52 @@ void AttributeChecker::visitDiscardableResultAttr(DiscardableResultAttr *attr) {
   }
 }
 
+void AttributeChecker::visitImplementsAttr(ImplementsAttr *attr) {
+  TypeLoc &ProtoTypeLoc = attr->getProtocolType();
+  TypeResolutionOptions options;
+  options |= TR_AllowUnboundGenerics;
+
+  DeclContext *DC = D->getDeclContext();
+  Type T = TC.resolveType(ProtoTypeLoc.getTypeRepr(),
+                          DC, options);
+  ProtoTypeLoc.setType(T);
+
+  // Definite error-types were already diagnosed in resolveType.
+  if (!T || T->hasError())
+    return;
+
+  // Check that we got a ProtocolType.
+  if (auto PT = T->getAs<ProtocolType>()) {
+    ProtocolDecl *PD = PT->getDecl();
+
+    // Check that the ProtocolType has the specified member.
+    LookupResult R = TC.lookupMember(PD->getDeclContext(),
+                                     PT, attr->getMemberName());
+    if (!R) {
+      TC.diagnose(attr->getLocation(),
+                  diag::implements_attr_protocol_lacks_member,
+                  PD->getBaseName(), attr->getMemberName())
+        .highlight(attr->getMemberNameLoc().getSourceRange());
+    }
+
+    // Check that the decl we're decorating is a member of a type that actually
+    // conforms to the specified protocol.
+    NominalTypeDecl *NTD = DC->getAsNominalTypeOrNominalTypeExtensionContext();
+    SmallVector<ProtocolConformance *, 2> conformances;
+    if (!NTD->lookupConformance(DC->getParentModule(), PD, conformances)) {
+      TC.diagnose(attr->getLocation(),
+                  diag::implements_attr_protocol_not_conformed_to,
+                  NTD->getFullName(), PD->getFullName())
+        .highlight(ProtoTypeLoc.getTypeRepr()->getSourceRange());
+    }
+
+  } else {
+    TC.diagnose(attr->getLocation(),
+                diag::implements_attr_non_protocol_type)
+      .highlight(ProtoTypeLoc.getTypeRepr()->getSourceRange());
+  }
+}
+
 void TypeChecker::checkDeclAttributes(Decl *D) {
   AttributeChecker Checker(*this, D);
 
@@ -1897,116 +2013,7 @@ void TypeChecker::checkTypeModifyingDeclAttributes(VarDecl *var) {
 
   if (auto *attr = var->getAttrs().getAttribute<OwnershipAttr>())
     checkOwnershipAttr(var, attr);
-  if (auto *attr = var->getAttrs().getAttribute<AutoClosureAttr>()) {
-    if (auto *pd = dyn_cast<ParamDecl>(var))
-      checkAutoClosureAttr(pd, attr);
-    else {
-      AttributeEarlyChecker Checker(*this, var);
-      Checker.diagnoseAndRemoveAttr(attr, diag::attr_only_one_decl_kind,
-                                    attr, "parameter");
-    }
-  }
-  if (auto *attr = var->getAttrs().getAttribute<NoEscapeAttr>()) {
-    if (auto *pd = dyn_cast<ParamDecl>(var))
-      checkNoEscapeAttr(pd, attr);
-    else {
-      AttributeEarlyChecker Checker(*this, var);
-      Checker.diagnoseAndRemoveAttr(attr, diag::attr_only_one_decl_kind,
-                                    attr, "parameter");
-    }
-  }
 }
-
-
-
-void TypeChecker::checkAutoClosureAttr(ParamDecl *PD, AutoClosureAttr *attr) {
-  // The paramdecl should have function type, and we restrict it to functions
-  // taking ().
-  auto *FTy = PD->getInterfaceType()->getAs<FunctionType>();
-  if (!FTy) {
-    diagnose(attr->getLocation(), diag::autoclosure_function_type);
-    attr->setInvalid();
-    return;
-  }
-
-  // Just stop if we've already applied this attribute.
-  if (FTy->isAutoClosure())
-    return;
-
-  // This decl attribute has been moved to being a type attribute.
-  auto text = attr->isEscaping() ? "@autoclosure @escaping " : "@autoclosure ";
-  diagnose(attr->getLocation(), diag::attr_decl_attr_now_on_type,
-           "@autoclosure")
-    .fixItRemove(attr->getRangeWithAt())
-    .fixItInsert(PD->getTypeLoc().getSourceRange().Start, text);
-
-  auto *FuncTyInput = FTy->getInput()->getAs<TupleType>();
-  if (!FuncTyInput || FuncTyInput->getNumElements() != 0) {
-    diagnose(attr->getLocation(), diag::autoclosure_function_input_nonunit);
-    attr->setInvalid();
-    return;
-  }
-
-  // Change the type to include the autoclosure bit.
-  PD->setType(
-      FTy->withExtInfo(FTy->getExtInfo().withIsAutoClosure(true)));
-
-  // And the interface type.
-  auto *IfaceFTy = PD->getInterfaceType()->getAs<FunctionType>();
-  PD->setInterfaceType(
-      IfaceFTy->withExtInfo(IfaceFTy->getExtInfo().withIsAutoClosure(true)));
-
-  // Autoclosure may imply noescape, so add a noescape attribute if this is a
-  // function parameter.
-  if (auto *NEAttr = PD->getAttrs().getAttribute<NoEscapeAttr>()) {
-    // If the parameter has both @noescape and @autoclosure, reject the
-    // explicit @noescape.
-    if (!NEAttr->isImplicit())
-      diagnose(NEAttr->getLocation(),
-               attr->isEscaping()
-                 ? diag::noescape_conflicts_escaping_autoclosure
-                 : diag::noescape_implied_by_autoclosure)
-        .fixItRemove(NEAttr->getRange());
-  } else if (!attr->isEscaping()) {
-    auto *newAttr = new (Context) NoEscapeAttr(/*isImplicit*/true);
-    PD->getAttrs().add(newAttr);
-    checkNoEscapeAttr(PD, newAttr);
-  }
-}
-
-void TypeChecker::checkNoEscapeAttr(ParamDecl *PD, NoEscapeAttr *attr) {
-  // The paramdecl should have function type.
-  auto *FTy = PD->getInterfaceType()->getAs<FunctionType>();
-  if (FTy == nullptr) {
-    diagnose(attr->getLocation(), diag::noescape_function_type);
-    attr->setInvalid();
-    return;
-  }
-
-  // This range can be implicit e.g. if we're in the middle of diagnosing
-  // @autoclosure.
-  auto attrRemovalRange = attr->getRangeWithAt();
-  if (attrRemovalRange.isValid()) {
-    // Take the attribute, the '@', and the trailing space.
-    attrRemovalRange.End = attrRemovalRange.End.getAdvancedLoc(1);
-  }
-  
-  // This decl attribute has been moved to being a type attribute.
-  if (!attr->isImplicit()) {
-    diagnose(attr->getLocation(), diag::attr_decl_attr_now_on_type, "@noescape")
-        .fixItRemove(attrRemovalRange)
-        .fixItInsert(PD->getTypeLoc().getSourceRange().Start, "@noescape ");
-  }
-
-  // Stop if we've already applied this attribute.
-  if (FTy->isNoEscape())
-    return;
-
-  // Change the type to include the noescape bit.
-  PD->setType(FunctionType::get(FTy->getInput(), FTy->getResult(),
-                                FTy->getExtInfo().withNoEscape(true)));
-}
-
 
 void TypeChecker::checkOwnershipAttr(VarDecl *var, OwnershipAttr *attr) {
   Type type = var->getType();
@@ -2017,56 +2024,49 @@ void TypeChecker::checkOwnershipAttr(VarDecl *var, OwnershipAttr *attr) {
     return;
 
   auto ownershipKind = attr->get();
-  assert(ownershipKind != Ownership::Strong &&
-         "Cannot specify 'strong' in an ownership attribute");
 
   // A weak variable must have type R? or R! for some ownership-capable type R.
   Type underlyingType = type;
-  if (ownershipKind == Ownership::Weak) {
+  switch (ownershipKind) {
+  case Ownership::Strong:
+    llvm_unreachable("Cannot specify 'strong' in an ownership attribute");
+  case Ownership::Unowned:
+  case Ownership::Unmanaged:
+    break;
+  case Ownership::Weak:
     if (var->isLet()) {
       diagnose(var->getStartLoc(), diag::invalid_weak_let);
       attr->setInvalid();
-      return;
     }
 
-    if (Type objType = type->getAnyOptionalObjectType())
+    if (Type objType = type->getAnyOptionalObjectType()) {
       underlyingType = objType;
-    else if (type->allowsOwnership()) {
-      // Use this special diagnostic if it's actually a reference type but just
-      // isn't Optional.
-      if (var->getAttrs().hasAttribute<IBOutletAttr>()) {
-        // Let @IBOutlet complain about this; it's more specific.
-        attr->setInvalid();
-        return;
-      }
-
-      diagnose(var->getStartLoc(), diag::invalid_weak_ownership_not_optional,
-               OptionalType::get(type));
-      attr->setInvalid();
-
-      return;
     } else {
-      // This is also an error, but the code below will diagnose it.
+      // @IBOutlet must be optional, but not necessarily weak. Let it diagnose.
+      if (!var->getAttrs().hasAttribute<IBOutletAttr>()) {
+        diagnose(var->getStartLoc(), diag::invalid_weak_ownership_not_optional,
+                 OptionalType::get(type));
+      }
+      attr->setInvalid();
     }
-  } else if (ownershipKind == Ownership::Strong) {
-    // We allow strong on optional-qualified reference types.
-    if (Type objType = type->getAnyOptionalObjectType())
-      underlyingType = objType;
+    break;
   }
 
   if (!underlyingType->allowsOwnership()) {
-    // If we have an opaque type, suggest the possibility of adding
-    // a class bound.
-    if (type->isExistentialType() || type->is<ArchetypeType>()) {
-      diagnose(var->getStartLoc(), diag::invalid_ownership_protocol_type,
-               (unsigned) ownershipKind, underlyingType);
-    } else {
-      diagnose(var->getStartLoc(), diag::invalid_ownership_type,
-               (unsigned) ownershipKind, underlyingType);
+    auto D = diag::invalid_ownership_type;
+
+    if (underlyingType->isExistentialType() ||
+        underlyingType->is<ArchetypeType>()) {
+      // Suggest the possibility of adding a class bound.
+      D = diag::invalid_ownership_protocol_type;
     }
+
+    diagnose(var->getStartLoc(), D, (unsigned) ownershipKind, underlyingType);
     attr->setInvalid();
-    return;
   }
+
+  if (attr->isInvalid())
+    return;
 
   // Change the type to the appropriate reference storage type.
   var->setType(ReferenceStorageType::get(

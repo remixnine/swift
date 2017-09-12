@@ -26,6 +26,7 @@
 #include "swift/AST/Module.h"
 #include "swift/AST/NameLookup.h"
 #include "swift/AST/Types.h"
+#include "swift/AST/TypeRepr.h"
 #include "swift/Basic/StringExtras.h"
 #include "swift/ClangImporter/ClangImporterOptions.h"
 #include "swift/Parse/Parser.h"
@@ -64,7 +65,9 @@ importer::nameVersionFromOptions(const LangOptions &langOpts) {
     return ImportNameVersion::Swift2;
   case 3:
     return ImportNameVersion::Swift3;
+  // Fixme: Figure out the importing story for 5 instead of falling back to 4.
   case 4:
+  case 5:
     return ImportNameVersion::Swift4;
   }
 }
@@ -376,7 +379,7 @@ void ClangImporter::Implementation::printSwiftName(ImportedName name,
     printFullContextPrefix(name, os, *this);
 
   // Base name.
-  os << name.getDeclName().getBaseName().str();
+  os << name.getDeclName().getBaseName();
 
   // Determine the number of argument labels we'll be producing.
   auto argumentNames = name.getDeclName().getArgumentNames();
@@ -496,7 +499,7 @@ static bool moduleIsInferImportAsMember(const clang::NamedDecl *decl,
     submodule = m;
   } else if (auto m = clangSema.getPreprocessor().getCurrentModule()) {
     submodule = m;
-  } else if (auto m = clangSema.getPreprocessor().getCurrentSubmodule()) {
+  } else if (auto m = clangSema.getPreprocessor().getCurrentLexerSubmodule()) {
     submodule = m;
   } else {
     return false;
@@ -506,9 +509,7 @@ static bool moduleIsInferImportAsMember(const clang::NamedDecl *decl,
     if (submodule->IsSwiftInferImportAsMember) {
       // HACK HACK HACK: This is a workaround for some module invalidation issue
       // and inconsistency. This will go away soon.
-      if (submodule->Name != "CoreGraphics")
-        return false;
-      return true;
+      return submodule->Name == "CoreGraphics";
     }
     submodule = submodule->Parent;
   }
@@ -588,6 +589,13 @@ static bool matchesVersion(A *versionedAttr, ImportNameVersion version) {
 const clang::SwiftNameAttr *
 importer::findSwiftNameAttr(const clang::Decl *decl,
                             ImportNameVersion version) {
+#ifndef NDEBUG
+  if (Optional<const clang::Decl *> def = getDefinitionForClangTypeDecl(decl)) {
+    assert((*def == nullptr || *def == decl) &&
+           "swift_name should only appear on the definition");
+  }
+#endif
+
   if (version == ImportNameVersion::Raw)
     return nullptr;
 
@@ -623,7 +631,7 @@ importer::findSwiftNameAttr(const clang::Decl *decl,
   // used for naming in Swift 2.
   if (attr->isImplicit()) return nullptr;
 
-  // Whitelist certain explicitly-written Swift names that were
+  // Hardcode certain kinds of explicitly-written Swift names that were
   // permitted and used in Swift 2. All others are ignored, so that we are
   // assuming a more direct translation from the Objective-C APIs into Swift.
 
@@ -835,9 +843,11 @@ NameImporter::determineEffectiveContext(const clang::NamedDecl *decl,
     case EnumKind::Enum:
     case EnumKind::Options:
       // Enums are mapped to Swift enums, Options to Swift option sets.
-      res = cast<clang::DeclContext>(enumDecl);
-      break;
-
+      if (version != ImportNameVersion::Raw) {
+        res = cast<clang::DeclContext>(enumDecl);
+        break;
+      }
+      LLVM_FALLTHROUGH;
     case EnumKind::Constants:
     case EnumKind::Unknown:
       // The enum constant goes into the redeclaration context of the
@@ -936,9 +946,9 @@ bool NameImporter::hasNamingConflict(const clang::NamedDecl *decl,
   return false;
 }
 
-bool NameImporter::shouldBeSwiftPrivate(const clang::NamedDecl *decl,
-                                        clang::Sema &clangSema) {
-
+static bool shouldBeSwiftPrivate(NameImporter &nameImporter,
+                                 const clang::NamedDecl *decl,
+                                 ImportNameVersion version) {
   // Decl with the attribute are obviously private
   if (decl->hasAttr<clang::SwiftPrivateAttr>())
     return true;
@@ -947,7 +957,12 @@ bool NameImporter::shouldBeSwiftPrivate(const clang::NamedDecl *decl,
   // private if the parent enum is marked private.
   if (auto *ECD = dyn_cast<clang::EnumConstantDecl>(decl)) {
     auto *ED = cast<clang::EnumDecl>(ECD->getDeclContext());
-    switch (getEnumKind(ED)) {
+    switch (nameImporter.getEnumKind(ED)) {
+    case EnumKind::Enum:
+    case EnumKind::Options:
+      if (version != ImportNameVersion::Raw)
+        break;
+      LLVM_FALLTHROUGH;
     case EnumKind::Constants:
     case EnumKind::Unknown:
       if (ED->hasAttr<clang::SwiftPrivateAttr>())
@@ -955,10 +970,6 @@ bool NameImporter::shouldBeSwiftPrivate(const clang::NamedDecl *decl,
       if (auto *enumTypedef = ED->getTypedefNameForAnonDecl())
         if (enumTypedef->hasAttr<clang::SwiftPrivateAttr>())
           return true;
-      break;
-
-    case EnumKind::Enum:
-    case EnumKind::Options:
       break;
     }
   }
@@ -1335,6 +1346,7 @@ ImportedName NameImporter::importNameImpl(const clang::NamedDecl *D,
   case clang::DeclarationName::CXXLiteralOperatorName:
   case clang::DeclarationName::CXXOperatorName:
   case clang::DeclarationName::CXXUsingDirective:
+  case clang::DeclarationName::CXXDeductionGuideName:
     // Handling these is part of C++ interoperability.
     llvm_unreachable("unhandled C++ interoperability");
 
@@ -1504,7 +1516,7 @@ ImportedName NameImporter::importNameImpl(const clang::NamedDecl *D,
 
   // Enumeration constants may have common prefixes stripped.
   bool strippedPrefix = false;
-  if (isa<clang::EnumConstantDecl>(D)) {
+  if (version != ImportNameVersion::Raw && isa<clang::EnumConstantDecl>(D)) {
     auto enumDecl = cast<clang::EnumDecl>(D->getDeclContext());
     auto enumInfo = getEnumInfo(enumDecl);
 
@@ -1517,7 +1529,7 @@ ImportedName NameImporter::importNameImpl(const clang::NamedDecl *D,
         // Calculate the new prefix.
         // What if the preferred name causes longer prefix?
         StringRef subPrefix = [](StringRef LHS, StringRef RHS) {
-          if(LHS.size() > RHS.size())
+          if (LHS.size() > RHS.size())
             std::swap(LHS, RHS) ;
           return StringRef(LHS.data(), std::mismatch(LHS.begin(), LHS.end(),
             RHS.begin()).first - LHS.begin());
@@ -1535,10 +1547,12 @@ ImportedName NameImporter::importNameImpl(const clang::NamedDecl *D,
   // "Code" off the end of the name, if it's there, because it's
   // redundant.
   if (auto enumDecl = dyn_cast<clang::EnumDecl>(D)) {
-    auto enumInfo = getEnumInfo(enumDecl);
-    if (enumInfo.isErrorEnum() && baseName.size() > 4 &&
-        camel_case::getLastWord(baseName) == "Code")
-      baseName = baseName.substr(0, baseName.size() - 4);
+    if (enumDecl->isThisDeclarationADefinition()) {
+      auto enumInfo = getEnumInfo(enumDecl);
+      if (enumInfo.isErrorEnum() && baseName.size() > 4 &&
+          camel_case::getLastWord(baseName) == "Code")
+        baseName = baseName.substr(0, baseName.size() - 4);
+    }
   }
 
   // Objective-C protocols may have the suffix "Protocol" appended if
@@ -1626,7 +1640,7 @@ ImportedName NameImporter::importNameImpl(const clang::NamedDecl *D,
   // If this declaration has the swift_private attribute, prepend "__" to the
   // appropriate place.
   SmallString<16> swiftPrivateScratch;
-  if (shouldBeSwiftPrivate(D, clangSema)) {
+  if (shouldBeSwiftPrivate(*this, D, version)) {
     // Special case: empty arg factory, "for historical reasons", is not private
     if (isInitializer && argumentNames.empty() &&
         (result.getInitKind() == CtorInitializerKind::Factory ||
@@ -1670,7 +1684,7 @@ static bool shouldIgnoreMacro(StringRef name, const clang::MacroInfo *macro) {
   if (macro->isFunctionLike())
     return true;
 
-  // Consult the blacklist of macros to suppress.
+  // Consult the list of macros to suppress.
   auto suppressMacro = llvm::StringSwitch<bool>(name)
 #define SUPPRESS_MACRO(NAME) .Case(#NAME, true)
 #include "MacroTable.def"

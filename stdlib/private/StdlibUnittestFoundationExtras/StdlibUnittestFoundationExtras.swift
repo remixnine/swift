@@ -27,16 +27,20 @@ public func withOverriddenLocaleCurrentLocale<Result>(
   _ temporaryLocale: NSLocale,
   _ body: () -> Result
 ) -> Result {
-  let oldMethod = class_getClassMethod(
-    NSLocale.self, #selector(getter: NSLocale.current))
-  precondition(oldMethod != nil, "could not find +[Locale currentLocale]")
+  guard let oldMethod = class_getClassMethod(
+    NSLocale.self, #selector(getter: NSLocale.current)) as Optional
+  else {
+    _preconditionFailure("Could not find +[Locale currentLocale]")
+  }
 
-  let newMethod = class_getClassMethod(
-    NSLocale.self, #selector(NSLocale._swiftUnittest_currentLocale))
-  precondition(newMethod != nil, "could not find +[Locale _swiftUnittest_currentLocale]")
+  guard let newMethod = class_getClassMethod(
+    NSLocale.self, #selector(NSLocale._swiftUnittest_currentLocale)) as Optional
+  else {
+    _preconditionFailure("Could not find +[Locale _swiftUnittest_currentLocale]")
+  }
 
   precondition(_temporaryLocaleCurrentLocale == nil,
-    "nested calls to withOverriddenLocaleCurrentLocale are not supported")
+    "Nested calls to withOverriddenLocaleCurrentLocale are not supported")
 
   _temporaryLocaleCurrentLocale = temporaryLocale
   method_exchangeImplementations(oldMethod, newMethod)
@@ -53,7 +57,7 @@ public func withOverriddenLocaleCurrentLocale<Result>(
 ) -> Result {
   precondition(
     NSLocale.availableLocaleIdentifiers.contains(temporaryLocaleIdentifier),
-    "requested locale \(temporaryLocaleIdentifier) is not available")
+    "Requested locale \(temporaryLocaleIdentifier) is not available")
 
   return withOverriddenLocaleCurrentLocale(
     NSLocale(localeIdentifier: temporaryLocaleIdentifier), body)

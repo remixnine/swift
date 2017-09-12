@@ -74,21 +74,24 @@ class SILModule::SerializationCallback : public SerializedSILLoader::Callback {
       return;
     }
   }
+
+  void didDeserializeFunctionBody(ModuleDecl *M, SILFunction *fn) override {
+    // Callbacks are currently applied in the order they are registered.
+    for (auto callBack : fn->getModule().getDeserializationCallbacks())
+      callBack(M, fn);
+  }
 };
 
 SILModule::SILModule(ModuleDecl *SwiftModule, SILOptions &Options,
-                     const DeclContext *associatedDC, bool wholeModule,
-                     bool wholeModuleSerialized)
+                     const DeclContext *associatedDC, bool wholeModule)
     : TheSwiftModule(SwiftModule), AssociatedDeclContext(associatedDC),
       Stage(SILStage::Raw), Callback(new SILModule::SerializationCallback()),
-      wholeModule(wholeModule), WholeModuleSerialized(wholeModuleSerialized),
-      Options(Options), Types(*this) {}
+      wholeModule(wholeModule), Options(Options), Types(*this) {}
 
 SILModule::~SILModule() {
   // Decrement ref count for each SILGlobalVariable with static initializers.
   for (SILGlobalVariable &v : silGlobals)
-    if (v.getInitializer())
-      v.getInitializer()->decrementRefCount();
+    v.dropAllReferences();
 
   // Drop everything functions in this module reference.
   //
@@ -234,7 +237,7 @@ SILFunction *SILModule::getOrCreateFunction(SILLocation loc,
                                             IsTransparent_t isTransparent,
                                             IsSerialized_t isSerialized,
                                             IsThunk_t isThunk,
-                                            SILFunction::ClassVisibility_t CV) {
+                                            SubclassScope subclassScope) {
   if (auto fn = lookUpFunction(name)) {
     assert(fn->getLoweredFunctionType() == type);
     assert(fn->getLinkage() == linkage ||
@@ -244,51 +247,9 @@ SILFunction *SILModule::getOrCreateFunction(SILLocation loc,
 
   auto fn = SILFunction::create(*this, linkage, name, type, nullptr,
                                 loc, isBareSILFunction, isTransparent,
-                                isSerialized, isThunk, CV);
+                                isSerialized, isThunk, subclassScope);
   fn->setDebugScope(new (*this) SILDebugScope(loc, fn));
   return fn;
-}
-
-static SILFunction::ClassVisibility_t getClassVisibility(SILDeclRef constant) {
-  if (!constant.hasDecl())
-    return SILFunction::NotRelevant;
-
-  // If this declaration is a function which goes into a vtable, then it's
-  // symbol must be as visible as its class. Derived classes even have to put
-  // all less visible methods of the base class into their vtables.
-
-  auto *FD = dyn_cast<AbstractFunctionDecl>(constant.getDecl());
-  if (!FD)
-    return SILFunction::NotRelevant;
-
-  DeclContext *context = FD->getDeclContext();
-
-  // Methods from extensions don't go into vtables (yet).
-  if (context->isExtensionContext())
-    return SILFunction::NotRelevant;
-
-  auto *classType = context->getAsClassOrClassExtensionContext();
-  if (!classType || classType->isFinal())
-    return SILFunction::NotRelevant;
-
-  if (FD->isFinal() && !FD->getOverriddenDecl())
-    return SILFunction::NotRelevant;
-
-  assert(FD->getEffectiveAccess() <= classType->getEffectiveAccess() &&
-         "class must be as visible as its members");
-
-  switch (classType->getEffectiveAccess()) {
-    case Accessibility::Private:
-    case Accessibility::FilePrivate:
-      return SILFunction::NotRelevant;
-    case Accessibility::Internal:
-      return SILFunction::InternalClass;
-    case Accessibility::Public:
-    case Accessibility::Open:
-      return SILFunction::PublicClass;
-  }
-
-  llvm_unreachable("Unhandled Accessibility in switch.");
 }
 
 static bool verifySILSelfParameterType(SILDeclRef DeclRef,
@@ -362,7 +323,7 @@ SILFunction *SILModule::getOrCreateFunction(SILLocation loc,
   auto *F = SILFunction::create(*this, linkage, name,
                                 constantType, nullptr,
                                 None, IsNotBare, IsTrans, IsSer, IsNotThunk,
-                                getClassVisibility(constant),
+                                constant.getSubclassScope(),
                                 inlineStrategy, EK);
   F->setDebugScope(new (*this) SILDebugScope(loc, F));
 
@@ -413,20 +374,19 @@ SILFunction *SILModule::getOrCreateSharedFunction(SILLocation loc,
                                                   IsThunk_t isThunk) {
   return getOrCreateFunction(loc, name, SILLinkage::Shared,
                              type, isBareSILFunction, isTransparent, isSerialized,
-                             isThunk, SILFunction::NotRelevant);
+                             isThunk, SubclassScope::NotApplicable);
 }
 
 SILFunction *SILModule::createFunction(
     SILLinkage linkage, StringRef name, CanSILFunctionType loweredType,
     GenericEnvironment *genericEnv, Optional<SILLocation> loc,
     IsBare_t isBareSILFunction, IsTransparent_t isTrans,
-    IsSerialized_t isSerialized, IsThunk_t isThunk,
-    SILFunction::ClassVisibility_t classVisibility,
+    IsSerialized_t isSerialized, IsThunk_t isThunk, SubclassScope subclassScope,
     Inline_t inlineStrategy, EffectsKind EK, SILFunction *InsertBefore,
     const SILDebugScope *DebugScope) {
   return SILFunction::create(*this, linkage, name, loweredType, genericEnv, loc,
                              isBareSILFunction, isTrans, isSerialized, isThunk,
-                             classVisibility, inlineStrategy, EK, InsertBefore,
+                             subclassScope, inlineStrategy, EK, InsertBefore,
                              DebugScope);
 }
 
@@ -594,31 +554,24 @@ void SILModule::removeFromZombieList(StringRef Name) {
 
 /// Erase a function from the module.
 void SILModule::eraseFunction(SILFunction *F) {
-
   assert(! F->isZombie() && "zombie function is in list of alive functions");
-  if (F->isInlined() || F->isExternallyUsedSymbol()) {
-    
-    // The owner of the function's Name is the FunctionTable key. As we remove
-    // the function from the table we have to store the name string elsewhere:
-    // in zombieFunctionNames.
-    StringRef copiedName = F->getName().copy(zombieFunctionNames);
-    FunctionTable.erase(F->getName());
-    F->Name = copiedName;
-    
-    // The function is dead, but we need it later (at IRGen) for debug info
-    // or vtable stub generation. So we move it into the zombie list.
-    getFunctionList().remove(F);
-    zombieFunctions.push_back(F);
-    ZombieFunctionTable[copiedName] = F;
-    F->setZombie();
+  // The owner of the function's Name is the FunctionTable key. As we remove
+  // the function from the table we have to store the name string elsewhere:
+  // in zombieFunctionNames.
+  StringRef copiedName = F->getName().copy(zombieFunctionNames);
+  FunctionTable.erase(F->getName());
+  F->Name = copiedName;
 
-    // This opens dead-function-removal opportunities for called functions.
-    // (References are not needed anymore.)
-    F->dropAllReferences();
-  } else {
-    FunctionTable.erase(F->getName());
-    getFunctionList().erase(F);
-  }
+  // The function is dead, but we need it later (at IRGen) for debug info
+  // or vtable stub generation. So we move it into the zombie list.
+  getFunctionList().remove(F);
+  zombieFunctions.push_back(F);
+  ZombieFunctionTable[copiedName] = F;
+  F->setZombie();
+
+  // This opens dead-function-removal opportunities for called functions.
+  // (References are not needed anymore.)
+  F->dropAllReferences();
 }
 
 void SILModule::invalidateFunctionInSILCache(SILFunction *F) {
@@ -735,40 +688,37 @@ SILModule::lookUpFunctionInDefaultWitnessTable(const ProtocolDecl *Protocol,
   return std::make_pair(nullptr, nullptr);
 }
 
-static ClassDecl *getClassDeclSuperClass(ClassDecl *Class) {
-  Type T = Class->getSuperclass();
-  if (!T)
-    return nullptr;
-  return T->getCanonicalType()->getClassOrBoundGenericClass();
-}
-
 SILFunction *
 SILModule::
 lookUpFunctionInVTable(ClassDecl *Class, SILDeclRef Member) {
-  // Until we reach the top of the class hierarchy...
-  while (Class) {
-    // Try to lookup a VTable for Class from the module...
-    auto *Vtbl = lookUpVTable(Class);
+  // Try to lookup a VTable for Class from the module...
+  auto *Vtbl = lookUpVTable(Class);
 
-    // Bail, if the lookup of VTable fails.
-    if (!Vtbl) {
-      return nullptr;
-    }
-
-    // Ok, we have a VTable. Try to lookup the SILFunction implementation from
-    // the VTable.
-    if (SILFunction *F = Vtbl->getImplementation(*this, Member))
-      return F;
-
-    // If we fail to lookup the SILFunction, again skip Class and attempt to
-    // resolve the method in the VTable of the super class of Class if such a
-    // super class exists.
-    Class = getClassDeclSuperClass(Class);
+  // Bail, if the lookup of VTable fails.
+  if (!Vtbl) {
+    return nullptr;
   }
+
+  // Ok, we have a VTable. Try to lookup the SILFunction implementation from
+  // the VTable.
+  if (auto E = Vtbl->getEntry(*this, Member))
+    return E->Implementation;
 
   return nullptr;
 }
 
+void SILModule::registerDeserializationCallback(
+    SILFunctionBodyCallback callBack) {
+  if (std::find(DeserializationCallbacks.begin(),
+                DeserializationCallbacks.end(), callBack)
+      == DeserializationCallbacks.end())
+    DeserializationCallbacks.push_back(callBack);
+}
+
+ArrayRef<SILModule::SILFunctionBodyCallback>
+SILModule::getDeserializationCallbacks() {
+  return DeserializationCallbacks;
+}
 
 void SILModule::
 registerDeleteNotificationHandler(DeleteNotificationHandler* Handler) {

@@ -200,8 +200,8 @@ void StmtEmitter::visitBraceStmt(BraceStmt *S) {
   
   for (auto &ESD : S->getElements()) {
     
-    if (auto S = ESD.dyn_cast<Stmt*>())
-      if (isa<IfConfigStmt>(S))
+    if (auto D = ESD.dyn_cast<Decl*>())
+      if (isa<IfConfigDecl>(D))
         continue;
     
     // If we ever reach an unreachable point, stop emitting statements and issue
@@ -209,9 +209,9 @@ void StmtEmitter::visitBraceStmt(BraceStmt *S) {
     if (!SGF.B.hasValidInsertionPoint()) {
       // If this is an implicit statement or expression, just skip over it,
       // don't emit a diagnostic here.
-      if (Stmt *S = ESD.dyn_cast<Stmt*>()) {
+      if (auto *S = ESD.dyn_cast<Stmt*>()) {
         if (S->isImplicit()) continue;
-      } else if (Expr *E = ESD.dyn_cast<Expr*>()) {
+      } else if (auto *E = ESD.dyn_cast<Expr*>()) {
         if (E->isImplicit()) continue;
       }
       
@@ -226,7 +226,7 @@ void StmtEmitter::visitBraceStmt(BraceStmt *S) {
     }
 
     // Process children.
-    if (Stmt *S = ESD.dyn_cast<Stmt*>()) {
+    if (auto *S = ESD.dyn_cast<Stmt*>()) {
       visit(S);
       if (isa<ReturnStmt>(S))
         StmtType = ReturnStmtType;
@@ -236,7 +236,7 @@ void StmtEmitter::visitBraceStmt(BraceStmt *S) {
         StmtType = ContinueStmtType;
       if (isa<ThrowStmt>(S))
         StmtType = ThrowStmtType;
-    } else if (Expr *E = ESD.dyn_cast<Expr*>()) {
+    } else if (auto *E = ESD.dyn_cast<Expr*>()) {
       SGF.emitIgnoredExpr(E);
     } else {
       SGF.visit(ESD.get<Decl*>());
@@ -253,7 +253,7 @@ namespace {
                               SmallVectorImpl<CleanupHandle> &cleanups)
       : Storage(storage), Cleanups(cleanups) {}
 
-    void copyOrInitValueInto(SILGenFunction &gen, SILLocation loc,
+    void copyOrInitValueInto(SILGenFunction &SGF, SILLocation loc,
                              ManagedValue value, bool isInit) override {
       Storage = value.getValue();
       auto cleanup = value.getCleanup();
@@ -263,7 +263,7 @@ namespace {
 } // end anonymous namespace
 
 static InitializationPtr
-prepareIndirectResultInit(SILGenFunction &gen, CanType resultType,
+prepareIndirectResultInit(SILGenFunction &SGF, CanType resultType,
                           ArrayRef<SILResultInfo> &allResults,
                           MutableArrayRef<SILValue> &directResults,
                           ArrayRef<SILArgument*> &indirectResultAddrs,
@@ -274,7 +274,7 @@ prepareIndirectResultInit(SILGenFunction &gen, CanType resultType,
     tupleInit->SubInitializations.reserve(resultTupleType->getNumElements());
 
     for (auto resultEltType : resultTupleType.getElementTypes()) {
-      auto eltInit = prepareIndirectResultInit(gen, resultEltType, allResults,
+      auto eltInit = prepareIndirectResultInit(SGF, resultEltType, allResults,
                                                directResults,
                                                indirectResultAddrs, cleanups);
       tupleInit->SubInitializations.push_back(std::move(eltInit));
@@ -288,14 +288,14 @@ prepareIndirectResultInit(SILGenFunction &gen, CanType resultType,
   allResults = allResults.slice(1);
 
   // If it's indirect, we should be emitting into an argument.
-  if (gen.silConv.isSILIndirect(result)) {
+  if (SGF.silConv.isSILIndirect(result)) {
     // Pull off the next indirect result argument.
     SILValue addr = indirectResultAddrs.front();
     indirectResultAddrs = indirectResultAddrs.slice(1);
 
     // Create an initialization which will initialize it.
-    auto &resultTL = gen.getTypeLowering(addr->getType());
-    auto temporary = gen.useBufferAsTemporary(addr, resultTL);
+    auto &resultTL = SGF.getTypeLowering(addr->getType());
+    auto temporary = SGF.useBufferAsTemporary(addr, resultTL);
 
     // Remember the cleanup that will be activated.
     auto cleanup = temporary->getInitializedCleanup();
@@ -320,19 +320,19 @@ prepareIndirectResultInit(SILGenFunction &gen, CanType resultType,
 /// \param cleanups - will be filled (after initialization completes)
 ///   with all the active cleanups managing the result values
 static std::unique_ptr<Initialization>
-prepareIndirectResultInit(SILGenFunction &gen, CanType formalResultType,
+prepareIndirectResultInit(SILGenFunction &SGF, CanType formalResultType,
                           SmallVectorImpl<SILValue> &directResultsBuffer,
                           SmallVectorImpl<CleanupHandle> &cleanups) {
-  auto fnConv = gen.F.getConventions();
+  auto fnConv = SGF.F.getConventions();
 
   // Make space in the direct-results array for all the entries we need.
   directResultsBuffer.append(fnConv.getNumDirectSILResults(), SILValue());
 
   ArrayRef<SILResultInfo> allResults = fnConv.funcTy->getResults();
   MutableArrayRef<SILValue> directResults = directResultsBuffer;
-  ArrayRef<SILArgument*> indirectResultAddrs = gen.F.getIndirectResults();
+  ArrayRef<SILArgument*> indirectResultAddrs = SGF.F.getIndirectResults();
 
-  auto init = prepareIndirectResultInit(gen, formalResultType, allResults,
+  auto init = prepareIndirectResultInit(SGF, formalResultType, allResults,
                                         directResults, indirectResultAddrs,
                                         cleanups);
 
@@ -541,12 +541,6 @@ void StmtEmitter::visitGuardStmt(GuardStmt *S) {
   SGF.emitStmtCondition(S->getCond(), bodyBB, S);
 }
 
-
-void StmtEmitter::visitIfConfigStmt(IfConfigStmt *S) {
-  // Active members are attached to the enclosing declaration, so there's no
-  // need to walk anything within.
-}
-
 void StmtEmitter::visitWhileStmt(WhileStmt *S) {
   LexicalScope condBufferScope(SGF, S);
 
@@ -736,10 +730,6 @@ void StmtEmitter::visitRepeatWhileStmt(RepeatWhileStmt *S) {
   SGF.BreakContinueDestStack.pop_back();
 }
 
-void StmtEmitter::visitForStmt(ForStmt *S) {
-  llvm_unreachable("c-style for loop is always a semantic error");
-}
-
 void StmtEmitter::visitForEachStmt(ForEachStmt *S) {
   // Emit the 'iterator' variable that we'll be using for iteration.
   LexicalScope OuterForScope(SGF, CleanupLocation(S));
@@ -758,7 +748,7 @@ void StmtEmitter::visitForEachStmt(ForEachStmt *S) {
   SILValue addrOnlyBuf;
   ManagedValue nextBufOrValue;
 
-  if (optTL.isAddressOnly())
+  if (optTL.isAddressOnly() && SGF.silConv.useLoweredAddresses())
     addrOnlyBuf = SGF.emitTemporaryAllocation(S, optTL.getLoweredType());
 
   // Create a new basic block and jump into it.
@@ -773,7 +763,7 @@ void StmtEmitter::visitForEachStmt(ForEachStmt *S) {
   //
   // Advance the generator.  Use a scope to ensure that any temporary stack
   // allocations in the subexpression are immediately released.
-  if (optTL.isAddressOnly()) {
+  if (optTL.isAddressOnly() && SGF.silConv.useLoweredAddresses()) {
     Scope InnerForScope(SGF.Cleanups, CleanupLocation(S->getIteratorNext()));
     auto nextInit = SGF.useBufferAsTemporary(addrOnlyBuf, optTL);
     SGF.emitExprInto(S->getIteratorNext(), nextInit.get());
@@ -825,7 +815,7 @@ void StmtEmitter::visitForEachStmt(ForEachStmt *S) {
           //
           // *NOTE* If we do not have an address only value, then inputValue is
           // *already properly unwrapped.
-          if (optTL.isAddressOnly()) {
+          if (optTL.isAddressOnly() && SGF.silConv.useLoweredAddresses()) {
             inputValue =
                 SGF.emitManagedBufferWithCleanup(nextBufOrValue.getValue());
             inputValue = SGF.emitUncheckedGetOptionalValueFrom(

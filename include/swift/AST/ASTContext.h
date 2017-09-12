@@ -103,6 +103,7 @@ namespace swift {
   class SILBoxType;
   class TypeAliasDecl;
   class VarDecl;
+  class UnifiedStatsReporter;
 
   enum class KnownProtocolKind : uint8_t;
 
@@ -241,6 +242,9 @@ public:
   /// Cache of remapped types (useful for diagnostics).
   llvm::StringMap<Type> RemappedTypes;
 
+  /// Optional table of counters to report, nullptr when not collecting.
+  UnifiedStatsReporter *Stats = nullptr;
+
 private:
   /// \brief The current generation number, which reflects the number of
   /// times that external modules have been loaded.
@@ -258,6 +262,9 @@ private:
   llvm::DenseMap<const Pattern *, DeclContext *>
     DelayedPatternContexts;
 
+  /// Cache of module names that fail the 'canImport' test in this context.
+  llvm::SmallPtrSet<Identifier, 8> FailedModuleImportNames;
+  
 public:
   /// \brief Retrieve the allocator for the given arena.
   llvm::BumpPtrAllocator &
@@ -407,6 +414,9 @@ public:
   /// Retrieve the declaration of the "pointee" property of a pointer type.
   VarDecl *getPointerPointeePropertyDecl(PointerTypeKind ptrKind) const;
 
+  /// Retrieve the type Swift.AnyObject.
+  CanType getAnyObjectType() const;
+
   /// Retrieve the type Swift.Never.
   CanType getNeverType() const;
 
@@ -418,6 +428,10 @@ public:
 
   /// Retrieve the declaration of Foundation.NSError.
   ClassDecl *getNSErrorDecl() const;
+  /// Retrieve the declaration of Foundation.NSNumber.
+  ClassDecl *getNSNumberDecl() const;
+  /// Retrieve the declaration of Foundation.NSValue.
+  ClassDecl *getNSValueDecl() const;
 
   // Declare accessors for the known declarations.
 #define FUNC_DECL(Name, Id) \
@@ -454,6 +468,10 @@ public:
   /// Retrieve the declaration of Array.append(element:)
   FuncDecl *getArrayAppendElementDecl() const;
 
+  /// Retrieve the declaration of
+  /// Array.reserveCapacityForAppend(newElementsCount: Int)
+  FuncDecl *getArrayReserveCapacityDecl() const;
+
   /// Retrieve the declaration of Swift._unimplementedInitializer.
   FuncDecl *getUnimplementedInitializerDecl(LazyResolver *resolver) const;
 
@@ -475,6 +493,11 @@ public:
   /// library or Cocoa framework types that is known to be bridged by another
   /// module's overlay, for layering or implementation detail reasons.
   bool isTypeBridgedInExternalModule(NominalTypeDecl *nominal) const;
+
+  /// True if the given type is an Objective-C class that serves as the bridged
+  /// object type for many Swift value types, meaning that the conversion from
+  /// an object to a value is a conditional cast.
+  bool isObjCClassWithMultipleSwiftBridgedTypes(Type t);
 
   /// Get the Objective-C type that a Swift type bridges to, if any.
   /// 
@@ -659,7 +682,6 @@ public:
   /// Produce a new normal conformance for a property behavior.
   NormalProtocolConformance *
   getBehaviorConformance(Type conformingType,
-                         Type conformingInterfaceType,
                          ProtocolDecl *protocol,
                          SourceLoc loc,
                          AbstractStorageDecl *storage,
@@ -827,8 +849,9 @@ public:
   /// Retrieve or create the canonical generic environment of a canonical
   /// generic signature builder.
   GenericEnvironment *getOrCreateCanonicalGenericEnvironment(
-                                                     GenericSignatureBuilder *builder,
-                                                     ModuleDecl &module);
+                                       GenericSignatureBuilder *builder,
+                                       GenericSignature *sig,
+                                       ModuleDecl &module);
 
   /// Retrieve the inherited name set for the given class.
   const InheritedNameSet *getAllPropertyNames(ClassDecl *classDecl,
@@ -842,9 +865,23 @@ public:
   /// Retrieve a generic signature with a single unconstrained type parameter,
   /// like `<T>`.
   CanGenericSignature getSingleGenericParameterSignature() const;
-  
-  /// Whether our effective Swift version is in the Swift 3 family
+
+  /// Retrieve a generic signature with a single type parameter conforming
+  /// to the given existential type.
+  CanGenericSignature getExistentialSignature(CanType existential,
+                                              ModuleDecl *mod);
+
+  /// Whether our effective Swift version is in the Swift 3 family.
   bool isSwiftVersion3() const { return LangOpts.isSwiftVersion3(); }
+
+  /// Whether our effective Swift version is at least 'major'.
+  ///
+  /// This is usually the check you want; for example, when introducing
+  /// a new language feature which is only visible in Swift 5, you would
+  /// check for isSwiftVersionAtLeast(5).
+  bool isSwiftVersionAtLeast(unsigned major) const {
+    return LangOpts.isSwiftVersionAtLeast(major);
+  }
 
 private:
   friend Decl;

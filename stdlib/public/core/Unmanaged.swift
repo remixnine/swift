@@ -40,7 +40,7 @@ public struct Unmanaged<Instance : AnyObject> {
   ///
   /// This operation does not change reference counts.
   ///
-  ///     let str0: CFString = "boxcar"
+  ///     let str0 = "boxcar" as CFString
   ///     let bits = Unmanaged.passUnretained(str0)
   ///     let ptr = bits.toOpaque()
   ///
@@ -229,18 +229,4 @@ public struct Unmanaged<Instance : AnyObject> {
     return self
   }
 #endif
-}
-
-extension Unmanaged {
-  @available(*, unavailable, 
-    message:"use 'fromOpaque(_: UnsafeRawPointer)' instead")
-  public static func fromOpaque(_ value: OpaquePointer) -> Unmanaged {
-    Builtin.unreachable()
-  }
-  
-  @available(*, unavailable, 
-    message:"use 'toOpaque() -> UnsafeRawPointer' instead")
-  public func toOpaque() -> OpaquePointer {
-    Builtin.unreachable()
-  }
 }

@@ -44,10 +44,13 @@ namespace irgen {
   class OwnedAddress;
   class Address;
   class Size;
+  class StructLayout;
+  class TypeInfo;
   
   enum class ReferenceCounting : unsigned char;
   enum class IsaEncoding : unsigned char;
   enum class ClassDeallocationKind : unsigned char;
+  enum class FieldAccess : uint8_t;
   
   OwnedAddress projectPhysicalClassMemberAddress(IRGenFunction &IGF,
                                                  llvm::Value *base,
@@ -132,11 +135,32 @@ namespace irgen {
   /// correspond to the runtime alignment of instances of the class.
   llvm::Constant *tryEmitClassConstantFragileInstanceAlignMask(IRGenModule &IGM,
                                                         ClassDecl *theClass);
-  
-  /// What reference counting mechanism does a class use?
-  ReferenceCounting getReferenceCountingForClass(IRGenModule &IGM,
-                                                 ClassDecl *theClass);
-  
+  /// Emit the constant fragile offset of the given property inside an instance
+  /// of the class.
+  llvm::Constant *
+  tryEmitConstantClassFragilePhysicalMemberOffset(IRGenModule &IGM,
+                                                  SILType baseType,
+                                                  VarDecl *field);
+                                                  
+  unsigned getClassFieldIndex(IRGenModule &IGM,
+                              SILType baseType,
+                              VarDecl *field);
+    
+  FieldAccess getClassFieldAccess(IRGenModule &IGM,
+                                  SILType baseType,
+                                  VarDecl *field);
+
+  /// Creates a layout for the class \p classType with allocated tail elements
+  /// \p tailTypes.
+  ///
+  /// The caller is responsible for deleting the returned StructLayout.
+  StructLayout *getClassLayoutWithTailElems(IRGenModule &IGM, SILType classType,
+                                            llvm::ArrayRef<SILType> tailTypes);
+
+  /// What reference counting mechanism does a class-like type use?
+  ReferenceCounting getReferenceCountingForType(IRGenModule &IGM,
+                                                CanType type);
+
   /// What isa-encoding mechanism does a type use?
   IsaEncoding getIsaEncodingForType(IRGenModule &IGM, CanType type);
   

@@ -1,34 +1,35 @@
-// RUN: %target-swift-frontend -emit-silgen %s | %FileCheck %s
+// RUN: %target-swift-frontend -emit-silgen -enable-sil-ownership %s | %FileCheck %s
 
 func foo(f f: (() -> ())!) {
   var f: (() -> ())! = f
   f?()
 }
 // CHECK: sil hidden @{{.*}}foo{{.*}} : $@convention(thin) (@owned Optional<@callee_owned () -> ()>) -> () {
-// CHECK: bb0([[T0:%.*]] : $Optional<@callee_owned () -> ()>):
+// CHECK: bb0([[T0:%.*]] : @owned $Optional<@callee_owned () -> ()>):
 // CHECK:   [[F:%.*]] = alloc_box ${ var Optional<@callee_owned () -> ()> }
 // CHECK:   [[PF:%.*]] = project_box [[F]]
 // CHECK:   [[BORROWED_T0:%.*]] = begin_borrow [[T0]]
 // CHECK:   [[T0_COPY:%.*]] = copy_value [[BORROWED_T0]]
 // CHECK:   store [[T0_COPY]] to [init] [[PF]]
 // CHECK:   end_borrow [[BORROWED_T0]] from [[T0]]
-// CHECK:   [[T1:%.*]] = select_enum_addr [[PF]]
-// CHECK:   cond_br [[T1]], bb1, bb3
+// CHECK:   [[READ:%.*]] = begin_access [read] [unknown] [[PF]] : $*Optional<@callee_owned () -> ()>
+// CHECK:   [[T1:%.*]] = select_enum_addr [[READ]]
+// CHECK:   cond_br [[T1]], bb2, bb1
 //   If it does, project and load the value out of the implicitly unwrapped
 //   optional...
-// CHECK:    bb1:
-// CHECK-NEXT: [[FN0_ADDR:%.*]] = unchecked_take_enum_data_addr [[PF]]
+// CHECK:    bb2:
+// CHECK-NEXT: [[FN0_ADDR:%.*]] = unchecked_take_enum_data_addr [[READ]]
 // CHECK-NEXT: [[FN0:%.*]] = load [copy] [[FN0_ADDR]]
 //   .... then call it
 // CHECK:   apply [[FN0]]() : $@callee_owned () -> ()
-// CHECK:   br bb2
-// CHECK: bb2(
+// CHECK:   br bb3
+// CHECK: bb3(
 // CHECK:   destroy_value [[F]]
 // CHECK:   destroy_value [[T0]]
 // CHECK:   return
-// CHECK: bb3:
+// CHECK: bb4:
 // CHECK:   enum $Optional<()>, #Optional.none!enumelt
-// CHECK:   br bb2
+// CHECK:   br bb3
 //   The rest of this is tested in optional.swift
 // } // end sil function '{{.*}}foo{{.*}}'
 

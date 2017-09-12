@@ -86,11 +86,6 @@ public:
   /// Return the protocol requirement.
   ProtocolDecl *getRequirement() const;
   
-  /// Get the inherited conformance corresponding to the given protocol.
-  /// Returns `this` if `parent` is already the same as the protocol this
-  /// conformance represents.
-  ProtocolConformanceRef getInherited(ProtocolDecl *parent) const;
-
   /// Apply a substitution to the conforming type.
   ProtocolConformanceRef subst(Type origType,
                                TypeSubstitutionFn subs,
@@ -127,6 +122,12 @@ public:
                        ProtocolConformanceRef conformance,
                        Identifier name,
                        LazyResolver *resolver);
+
+  /// Determine whether this conformance is canonical.
+  bool isCanonical() const;
+
+  /// Create a canonical conformance from the current one.
+  ProtocolConformanceRef getCanonicalConformanceRef() const;
 };
 
 } // end namespace swift

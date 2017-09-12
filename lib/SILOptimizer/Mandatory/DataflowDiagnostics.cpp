@@ -43,6 +43,8 @@ static void diagnoseMissingReturn(const UnreachableInst *UI,
 
   if (auto *FD = FLoc.getAsASTNode<FuncDecl>()) {
     ResTy = FD->getResultInterfaceType();
+  } else if (auto *CD = FLoc.getAsASTNode<ConstructorDecl>()) {
+    ResTy = CD->getResultInterfaceType();
   } else if (auto *CE = FLoc.getAsASTNode<ClosureExpr>()) {
     ResTy = CE->getResultType();
   } else {
@@ -83,12 +85,6 @@ static void diagnoseUnreachable(const SILInstruction *I,
       return;
     }
 
-    // A non-exhaustive switch would also produce an unreachable instruction.
-    if (L.isASTNode<SwitchStmt>()) {
-      diagnoseMissingCases(Context, L.getAsASTNode<SwitchStmt>());
-      return;
-    }
-
     if (auto *Guard = L.getAsASTNode<GuardStmt>()) {
       diagnose(Context, Guard->getBody()->getEndLoc(),
                diag::guard_body_must_not_fallthrough);
@@ -108,7 +104,7 @@ static void diagnoseStaticReports(const SILInstruction *I,
 
       // Report diagnostic if the first argument has been folded to '1'.
       OperandValueArrayRef Args = BI->getArguments();
-      IntegerLiteralInst *V = dyn_cast<IntegerLiteralInst>(Args[0]);
+      auto *V = dyn_cast<IntegerLiteralInst>(Args[0]);
       if (!V || V->getValue() != 1)
         return;
 
@@ -121,8 +117,6 @@ static void diagnoseStaticReports(const SILInstruction *I,
 namespace {
 class EmitDFDiagnostics : public SILFunctionTransform {
   ~EmitDFDiagnostics() override {}
-
-  StringRef getName() override { return "Emit Dataflow Diagnostics"; }
 
   /// The entry point to the transformation.
   void run() override {

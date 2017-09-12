@@ -64,8 +64,8 @@ llvm::Value *irgen::emitArchetypeTypeMetadataRef(IRGenFunction &IGF,
            "type metadata for primary archetype was not bound in context");
 
     CanArchetypeType parent(archetype->getParent());
-    metadata = emitAssociatedTypeMetadataRef(IGF, parent,
-                                             archetype->getAssocType());
+    AssociatedType association(archetype->getAssocType());
+    metadata = emitAssociatedTypeMetadataRef(IGF, parent, association);
 
     setTypeMetadataName(IGF.IGM, metadata, archetype);
 
@@ -170,8 +170,7 @@ llvm::Value *irgen::emitArchetypeWitnessTableRef(IRGenFunction &IGF,
   // TODO: maybe Sema shouldn't ever do this?
   if (Type classBound = archetype->getSuperclass()) {
     auto conformance =
-      IGF.IGM.getSwiftModule()->lookupConformance(classBound, protocol,
-                                                  nullptr);
+      IGF.IGM.getSwiftModule()->lookupConformance(classBound, protocol);
     if (conformance && conformance->isConcrete()) {
       return emitWitnessTableRef(IGF, archetype, *conformance);
     }
@@ -242,8 +241,8 @@ llvm::Value *irgen::emitArchetypeWitnessTableRef(IRGenFunction &IGF,
 
     // Otherwise, it's an associated conformance requirement.
     } else {
-      WitnessIndex index =
-        lastPI.getAssociatedConformanceIndex(depType, requirement);
+      AssociatedConformance association(lastProtocol, depType, requirement);
+      WitnessIndex index = lastPI.getAssociatedConformanceIndex(association);
       path.addAssociatedConformanceComponent(index);
     }
 
@@ -263,46 +262,43 @@ llvm::Value *irgen::emitArchetypeWitnessTableRef(IRGenFunction &IGF,
 
 llvm::Value *irgen::emitAssociatedTypeMetadataRef(IRGenFunction &IGF,
                                                   CanArchetypeType origin,
-                                               AssociatedTypeDecl *associate) {
+                                                  AssociatedType association) {
   // Find the conformance of the origin to the associated type's protocol.
   llvm::Value *wtable = emitArchetypeWitnessTableRef(IGF, origin,
-                                                     associate->getProtocol());
+                                               association.getSourceProtocol());
 
   // Find the origin's type metadata.
   llvm::Value *originMetadata = emitArchetypeTypeMetadataRef(IGF, origin);
 
-  return emitAssociatedTypeMetadataRef(IGF, originMetadata, wtable, associate);
+  return emitAssociatedTypeMetadataRef(IGF, originMetadata, wtable,
+                                       association);
 }
 
 const TypeInfo *TypeConverter::convertArchetypeType(ArchetypeType *archetype) {
   assert(isExemplarArchetype(archetype) && "lowering non-exemplary archetype");
 
-  LayoutConstraint LayoutInfo = archetype->getLayoutConstraint();
+  auto layout = archetype->getLayoutConstraint();
 
   // If the archetype is class-constrained, use a class pointer
   // representation.
   if (archetype->requiresClass() ||
-      (LayoutInfo && LayoutInfo->isRefCounted())) {
-    ReferenceCounting refcount;
-    llvm::PointerType *reprTy;
+      (layout && layout->isRefCounted())) {
+    auto refcount = getReferenceCountingForType(IGM, CanType(archetype));
 
-    if (!IGM.ObjCInterop) {
-      refcount = ReferenceCounting::Native;
-      reprTy = IGM.RefCountedPtrTy;
-    } else {
-      refcount = ReferenceCounting::Unknown;
-      reprTy = IGM.UnknownRefCountedPtrTy;
-    }
+    llvm::PointerType *reprTy;
 
     // If the archetype has a superclass constraint, it has at least the
     // retain semantics of its superclass, and it can be represented with
     // the supertype's pointer type.
-    if (Type super = archetype->getSuperclass()) {
-      ClassDecl *superClass = super->getClassOrBoundGenericClass();
-      refcount = getReferenceCountingForClass(IGM, superClass);
-
+    if (auto super = archetype->getSuperclass()) {
       auto &superTI = IGM.getTypeInfoForUnlowered(super);
       reprTy = cast<llvm::PointerType>(superTI.StorageType);
+    } else {
+      if (refcount == ReferenceCounting::Native) {
+        reprTy = IGM.RefCountedPtrTy;
+      } else {
+        reprTy = IGM.UnknownRefCountedPtrTy;
+      }
     }
 
     // As a hack, assume class archetypes never have spare bits. There's a
@@ -320,9 +316,9 @@ const TypeInfo *TypeConverter::convertArchetypeType(ArchetypeType *archetype) {
 
   // If the archetype is trivial fixed-size layout-constrained, use a fixed size
   // representation.
-  if (LayoutInfo && LayoutInfo->isFixedSizeTrivial()) {
-    Size size(LayoutInfo->getTrivialSizeInBytes());
-    Alignment align(LayoutInfo->getTrivialSizeInBytes());
+  if (layout && layout->isFixedSizeTrivial()) {
+    Size size(layout->getTrivialSizeInBytes());
+    Alignment align(layout->getTrivialSizeInBytes());
     auto spareBits =
       SpareBitVector::getConstant(size.getValueInBits(), false);
     // Get an integer type of the required size.
@@ -336,7 +332,7 @@ const TypeInfo *TypeConverter::convertArchetypeType(ArchetypeType *archetype) {
   // If the archetype is a trivial layout-constrained, use a POD
   // representation. This type is not loadable, but it is known
   // to be a POD.
-  if (LayoutInfo && LayoutInfo->isAddressOnlyTrivial()) {
+  if (layout && layout->isAddressOnlyTrivial()) {
     // TODO: Create NonFixedSizeArchetypeTypeInfo and return it.
   }
 
